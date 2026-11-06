@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Data and figure roots of the figure scripts (figures/code/datapaths.py)
+/data/
+/figs/
+
+# Simulated benchmark: benchopt outputs, SLURM logs, analysis outputs, seed chunks written with the default --out-dir
+simulated/outputs/
+simulated/configs/chunks/
+simulated/analysis/out_*/
+
+# PCam: the Hugging Face cache of the dataset (about 7 GB), model caches, run and analysis outputs
+pcam/pcam_data/
+pcam/single_split_2026-01/pcam_data
+pcam/hf_cache/
+pcam/torch_cache/
+pcam/results_*/
+pcam/analysis/out_*/
+
+# Yelp: tokenized splits, Hugging Face cache, run outputs
+yelp/yelp_aligned/
+yelp/hf_cache/
+yelp/results_*/
+
+# Logs, archives and core dumps
+logs/
+slurm_output/
+*.zip
+*.tgz
+*.tar.gz
+core
+core.[0-9]*
+core-*
+
+# Run outputs and result files: only the code is published; the scripts regenerate tables and figures
+*.parquet
+*.csv
+*.pdf
+*.png
+*.log
+*.ipynb
+plots/
+results/
+work/

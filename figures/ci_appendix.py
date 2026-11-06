@@ -1,0 +1,136 @@
+"""Tables E.1 to E.8 of the paper (Appendix E): the sample gains (estimate on all seeds) and their 95% percentile bootstrap
+intervals, one table per gain figure, from the gain tables saved by paper_style_figs.py (--sim-tables) and
+regen_real_data_gain_figures.py (--real-tables). Prints the LaTeX to stdout. Table labels: tab:ci-fig4 (E.1),
+tab:ci-fig5 (E.2), tab:ci-figI1 (E.3), tab:ci-figJ1 (E.4), tab:ci-figF1 (E.5), tab:ci-figK1 (E.6), tab:ci-figL1 (E.7),
+tab:ci-figM1 (E.8)."""
+# PCam sizes are n_tr = 0.8 x study set (study sets 300 and 500 -> 240 and 400)
+import argparse, os, sys
+import numpy as np, pandas as pd
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "code"))
+import datapaths
+# The table folders are options; the defaults are the outputs of paper_style_figs.py and regen_real_data_gain_figures.py
+# under the figure root ($FIGS_DIR/sim and $FIGS_DIR/real, 1,000 draws each, order-averaged estimator).
+_ap = argparse.ArgumentParser(description=__doc__)
+_ap.add_argument("--sim-tables", default=datapaths.figs_path("sim", "tables"),
+                 help="tables/ of paper_style_figs.py --out-dir (default: $FIGS_DIR/sim/tables)")
+_ap.add_argument("--real-tables", default=datapaths.figs_path("real", "tables"),
+                 help="tables/ of regen_real_data_gain_figures.py --out-dir (default: $FIGS_DIR/real/tables)")
+_ap.add_argument("--nlp-tables", default=None, help="tables/ of its fig5_yelp run, if separate (default: --real-tables)")
+_ap.add_argument("--nlp-aligned-tables", default=None,
+                 help="tables/ of its fig5_yelp_aligned run, if separate (default: --real-tables)")
+_a = _ap.parse_args()
+S, R = _a.sim_tables, _a.real_tables
+R_NLP = _a.nlp_tables or R  # Yelp gains with one run per seed
+# BERT and XLM-RoBERTa re-run on the PCam protocol, Qwen3-0.6B as published (fig5_yelp_aligned)
+R_NLP_ALIGNED = _a.nlp_aligned_tables or R
+PCAM = {"densenet121": "DenseNet121", "mobilenet_v2": "MobileNetV2", "wide_resnet101_2": "WideResNet101\\_2", "vit_b_16": "ViT-B/16"}
+NLP = {"bert": "BERT", "roberta": "XLM-RoBERTa", "qwen3-0.6b": "Qwen3-0.6B"}
+tt = lambda x: "\\texttt{" + x + "}"
+
+def cells(df, keys, Ks):
+    """{(key tuple): {K: cell}} with estimate and percentile interval; flags floor / cap pile-ups."""
+    out = {}
+    for key, g in df.groupby(keys, sort=False):
+        key = key if isinstance(key, tuple) else (key,)
+        row = {}
+        for K in Ks:
+            d = g[g.K == K]
+            e, b = d[d.bootstrap_iter < 0].sample_gain, d[d.bootstrap_iter >= 0].sample_gain
+            if e.empty or b.empty:
+                row[K] = "--"; continue
+            lo, hi = np.quantile(b, [.025, .975])
+            flag = ""
+            if (b <= 1.0001).mean() >= .025:
+                flag += "^{\\dagger}"
+            if (b >= b.max() - 1e-9).mean() >= .025 and b.max() > 1.0001:
+                flag += "^{\\ddagger}"
+            row[K] = f"${float(e.iloc[0]):.1f}{flag}$ {{\\scriptsize $[{lo:.1f},\\,{hi:.1f}]$}}"
+        out[key] = row
+    return out
+
+def table(caption, label, header, rows, Ks):
+    cols = "l" * len(header) + "c" * len(Ks)
+    lines = ["\\begin{table}[htbp]", "    \\centering", f"    \\caption{{{caption}}}", f"    \\label{{{label}}}",
+             "    \\small", f"    \\begin{{tabular}}{{@{{}} {cols} @{{}}}}", "        \\toprule",
+             "        " + " & ".join([f"\\thead{{{h}}}" for h in header] + [f"$K={K}$" for K in Ks]) + " \\\\",
+             "        \\midrule"]
+    prev = None
+    for r in rows:
+        if r == "mid":
+            lines.append("        \\midrule"); prev = None; continue
+        r = list(r); first = r[0]
+        if len(header) > 1 and first == prev:
+            r[0] = ""
+        prev = first
+        lines.append("        " + " & ".join(r) + " \\\\")
+    lines += ["        \\bottomrule", "    \\end{tabular}", "\\end{table}", ""]
+    return "\n".join(lines)
+
+def rows_from(c, order, label_fns, Ks):
+    rows = []
+    for key in order:
+        if key == "mid":
+            rows.append("mid"); continue
+        if key in c:
+            rows.append([f(k) for f, k in zip(label_fns, key)] + [c[key][K] for K in Ks])
+    return rows
+
+out = []
+SIM = ["Ridge", "ExtraTrees", "MLP", "RandomFeatures"]
+# Figure 4 and Figure 5 (left) (Table E.1)
+f4 = pd.read_parquet(f"{S}/fig4.parquet"); K4 = [5, 10, 20, 200]
+c = cells(f4, ["solver_disp"], K4)
+out.append(table("Sample gains $G^{\\text{test}}_K$ of \\autoref{fig:avg_test_sample_gain_simulated} and \\autoref{fig:all_data_test_sample_gains} (left): simulated linear process, $n_{\\text{tr}} = 1{,}000$, $1{,}000$ seeds, mean squared error.",
+                 "tab:ci-fig4", ["Algorithm"], rows_from(c, [(l,) for l in SIM], [tt], K4), K4))
+K = [5, 10, 20]
+# Figure 5 (middle, right) (Table E.2)
+pc = pd.read_parquet(f"{R}/pcam_accuracy.parquet"); pc = pc[(pc.N == 500) & (pc.cv_procedure == "MCCV")]
+y = pd.read_parquet(f"{R_NLP_ALIGNED}/nlp_delta_aligned_with_qwen.parquet"); y = y[y.N == 1250]
+c1, c2 = cells(pc, ["model"], K), cells(y, ["model"], K)
+rows = [["\\texttt{PCam}, $n_{\\text{tr}}=400$", tt(PCAM[m])] + [c1[(m,)][k] for k in K] for m in PCAM if (m,) in c1] + ["mid"] + \
+       [["\\texttt{Yelp}, $n_{\\text{tr}}=1{,}000$", tt(NLP[m])] + [c2[(m,)][k] for k in K] for m in NLP if (m,) in c2]
+out.append(table("Sample gains of \\autoref{fig:all_data_test_sample_gains} (middle and right): accuracy; \\texttt{PCam}: $50$ seeds; \\texttt{Yelp}: $50$ seeds; the single split is the first of the $20$ splits of each seed for \\texttt{BERT} and \\texttt{XLM-RoBERTa}, a separate run with the same seed for \\texttt{Qwen3-0.6B}.",
+                 "tab:ci-fig5", ["Dataset", "Network"], rows, K))
+# Figure I.1 (Table E.5)
+f1 = pd.read_parquet(f"{R}/figF1.parquet")
+c = cells(f1, ["model", "cv_procedure"], K)
+order = [(m, p) for m in ("densenet121", "mobilenet_v2", "wide_resnet101_2") for p in ("MCCV", "RepeatedKFold")]
+out.append(table("Sample gains of \\autoref{fig:pcam_mccv_vs_kfold}: \\texttt{PCam}, $n_{\\text{tr}}=240$, accuracy, $50$ seeds.",
+                 "tab:ci-figF1", ["Network", "Procedure"],
+                 rows_from(c, order, [lambda m: tt(PCAM[m]), lambda p: {"MCCV": "MCCV", "RepeatedKFold": "Repeated 5-Fold"}[p]], K), K))
+# Figure G.1 (Table E.3)
+i1 = pd.read_parquet(f"{S}/figI1.parquet")
+i1["procedure_disp"] = i1.solver_disp.map(lambda x: "Grid search" if x.endswith("_GridSearch") else
+                                          "Random search" if x.endswith("_RandomSearch") else "Fixed")
+i1["solver_disp"] = i1.solver_disp.str.replace("_GridSearch", "").str.replace("_RandomSearch", "")
+c = cells(i1, ["solver_disp", "procedure_disp"], K)
+order = [(l, p) for l in ("MLP", "ExtraTrees") for p in ("Fixed", "Grid search", "Random search")]
+out.append(table("Sample gains of \\autoref{fig:hpo-gains}: simulated linear process, $n_{\\text{tr}}=1{,}000$, $1{,}000$ seeds, mean squared error.",
+                 "tab:ci-figI1", ["Algorithm", "Tuning"], rows_from(c, order, [tt, str], K), K))
+# Figure H.1 (Table E.4)
+j1 = pd.read_parquet(f"{S}/figJ1.parquet")
+c = cells(j1, ["solver_disp", "split_mode"], K)
+order = [(l, s) for l in SIM for s in ("Resampled split", "Fixed split")]
+out.append(table("Sample gains of \\autoref{fig:fixed-vs-resampled}: simulated linear process, $n_{\\text{tr}}=100$, $1{,}000$ seeds, mean squared error; frozen: a single split repeated $K$ times.",
+                 "tab:ci-figJ1", ["Algorithm", "Split"], rows_from(c, order, [tt, lambda s: {"Resampled split": "reshuffled", "Fixed split": "frozen"}[s]], K), K))
+# Figure J.1 (Table E.6)
+k1 = pd.read_parquet(f"{R}/figK1.parquet")
+c = cells(k1, ["model", "stratified"], K)
+order = [(m, s) for m in PCAM for s in (False, True)]
+out.append(table("Sample gains of \\autoref{fig:stratified-overlay}: \\texttt{PCam}, $n_{\\text{tr}}=400$, negative log-likelihood, $100$ seeds, against the stratified single-split baseline.",
+                 "tab:ci-figK1", ["Network", "Resampling"], rows_from(c, order, [lambda m: tt(PCAM[m]), lambda s: "stratified" if s else "unstratified"], K), K))
+# Figure K.1 (Table E.7)
+l1 = pd.read_parquet(f"{R}/figL1.parquet")
+c = cells(l1, ["metric"], K)
+out.append(table("Sample gains of \\autoref{fig:metrics-gain}: \\texttt{PCam}, \\texttt{WideResNet101\\_2}, $n_{\\text{tr}}=400$, stratified resampling, $100$ seeds.",
+                 "tab:ci-figL1", ["Metric"], rows_from(c, [("Accuracy",), ("Brier",), ("NLL",)], [lambda x: {"Accuracy": "accuracy", "Brier": "Brier score", "NLL": "negative log-likelihood"}[x]], K), K))
+# Figure L.1, all budgets (Table E.8)
+m1 = pd.read_parquet(f"{S}/figM1.parquet")
+c = cells(m1, ["N", "solver_disp"], K)
+order = []
+for n in sorted(m1.N.unique()):
+    order += [(n, l) for l in SIM] + ["mid"]
+rows = rows_from(c, order[:-1], [lambda n: f"${int(n)}$", tt], K)
+out.append(table("Sample gains at the small budgets of \\autoref{appendix:label-scarce} (\\autoref{fig:small-label-gain} shows $n_{\\text{tr}} = 30$ and $100$): simulated linear process, $1{,}000$ seeds, mean squared error.",
+                 "tab:ci-figM1", ["$n_{\\text{tr}}$", "Algorithm"], rows, K))
+print("\n".join(out))

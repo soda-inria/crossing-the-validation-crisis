@@ -1,0 +1,764 @@
+# %% [markdown]
+# # PatchCamelyon training loop of "Crossing the Validation Crisis" (Eve, Varoquaux and Moreau, 2026)
+#
+# Adapted from a training script shared by the TIAToolbox authors (Pocock et al., 2022,
+# https://github.com/TissueImageAnalytics/tiatoolbox). This script does not call TIAToolbox itself.
+#
+# Protocol (Appendix F.3 of the paper):
+# * the official training and validation splits of PCam (Hugging Face dataset 1aurent/PatchCamelyon,
+#   294,912 images) are merged; a fixed stratified split (random_state 42) keeps 244,912 images as the
+#   benchmarking set and leaves a pool of 50,000;
+# * for each seed, a stratified study set of round(n_tr / (1 - 1/5)) images is drawn from the pool
+#   (--train-sizes gives n_tr, the training and validation subsets together); the rest of the pool is the
+#   outer set;
+# * each of the K splits of the study set (ShuffleSplit, or repeated 5-fold with --cv-method repeated_kfold;
+#   test fraction 1/5, optionally stratified with --stratify) trains an ImageNet-pretrained torchvision
+#   network on three fifths of the study set with Adam, keeps the epoch with the best accuracy on the
+#   validation fifth, and scores that model on the validation subset, the test fold and the benchmarking set
+#   (accuracy, negative log-likelihood, Brier score);
+# * the model of the first split also scores the outer set, in chunks of the test-fold size (at most 200);
+#   with --no-cross-validation every split does;
+# * the study-only redundancy statistics (Appendix D.2) are computed from the per-sample test losses.
+# Each run writes one Parquet file to results_output_pcam/. See README.md for the data preparation and the
+# configuration files of the paper's runs.
+
+# %%
+import argparse
+import gc
+import os
+import time
+import copy
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torchvision.models as torch_models
+from datasets import load_dataset
+from PIL import Image
+from sklearn.model_selection import (
+    ShuffleSplit, RepeatedKFold, StratifiedShuffleSplit,
+    RepeatedStratifiedKFold, train_test_split,
+)
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
+from torchvision import transforms
+
+# %% [markdown]
+# ## Argument Parsing & Configuration
+
+# %%
+def get_available_models():
+    """Returns a list of available model names."""
+    return [
+        "alexnet", "resnet18", "resnet34", "resnet50", "resnet101",
+        "resnext50_32x4d", "resnext101_32x8d", "wide_resnet50_2",
+        "wide_resnet101_2", "densenet121", "densenet161", "densenet169",
+        "densenet201", "inception_v3", "googlenet", "mobilenet_v2",
+        "mobilenet_v3_large", "mobilenet_v3_small",
+        "vit_b_16", "vit_b_32", "vit_l_16", "vit_l_32",
+    ]
+
+def _is_vit(backbone):
+    return backbone.startswith("vit_")
+
+def parse_arguments():
+    """Parses command-line arguments."""
+    parser = argparse.ArgumentParser(description="Run PCam training benchmarks.")
+    parser.add_argument("--gpu-id", type=str, default="0", help="GPU ID to use.")
+
+    # Cross-validation boolean
+    parser.add_argument("--cross-validation", action="store_true", default=True,
+                        help="Perform standard cross-validation (default).")
+    parser.add_argument("--no-cross-validation", action="store_false", dest="cross_validation",
+                        help="Disable cross-validation mechanism and enable hidden test set evaluation.")
+
+    parser.add_argument("--n-splits", type=int, nargs='+', default=[1], help="Total number of CV splits. For ShuffleSplit: number of random splits. For RepeatedKFold: total splits = k_folds * n_repeats, where k_folds is inferred from test_size.")
+    parser.add_argument("--cv-method", type=str, default="shuffle_split", choices=["shuffle_split", "repeated_kfold"], help="Cross-validation method to use.")
+    parser.add_argument("--stratify", action="store_true", default=False, help="Stratify the outer CV fold splits by label.")
+    parser.add_argument("--seeds", type=int, nargs=2, default=[0, 1], metavar=('START', 'END_EXCLUSIVE'), help="Range of seeds.")
+    parser.add_argument("--train-sizes", type=int, nargs='+', default=[1000, 10000], help="List of train (train+validation) sizes. Each value is the per-fold train+val size the model uses; the study pool is sized up by 1/(1-test_size) to also hold the rotating CV test fold.")
+    parser.add_argument("--model-choices", type=str, nargs='+', default=["resnet18"], choices=get_available_models(), help="Algorithms to train.")
+    parser.add_argument("--epochs", type=int, default=2, help="Number of training epochs.")
+    parser.add_argument("--batch-size", type=int, default=64, help="Training and evaluation batch size.")
+    parser.add_argument("--bench-max-samples", type=int, default=0,
+                        help="If > 0, evaluate on a fixed stratified random subset of at most this many "
+                             "benchmarking-set samples (random_state 43) instead of the full ~240k set. The "
+                             "oracle score keeps a negligible sampling error (Var ~ 0.25/N) while ViT-B/16 "
+                             "evaluation time per fold drops proportionally. 0 (default) = full set.")
+    return parser.parse_args()
+
+args = parse_arguments()
+os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+
+# Training Configuration
+epochs = args.epochs
+loss_function = nn.CrossEntropyLoss()
+test_size = 1/5
+valid_size = 1/5
+BatchSize = args.batch_size
+study_set_sizes = args.train_sizes
+backbone_list = args.model_choices
+n_splits_values = args.n_splits
+cv_method = args.cv_method
+do_stratify = args.stratify
+seeds = range(args.seeds[0], args.seeds[1])
+do_cross_validation = args.cross_validation
+
+OUTPUT_DIR = Path("results_output_pcam")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+print("\n--- Configuration ---")
+for key, value in vars(args).items():
+    print(f"  {key}: {value}")
+print("---------------------\n")
+
+
+# %% [markdown]
+# ## Data Loading and Preparation
+
+# %%
+# Define data transform
+transform = transforms.Compose([
+    transforms.ToTensor(),
+])
+
+# Load PCam. ./pcam_data is a Hugging Face cache of the dataset HF_NAME (about 7 GB of Arrow files), read as a
+# local folder (its "valid" split then comes out as "validation"). On a fresh clone it is first downloaded into
+# ./pcam_data, at the revision used for the paper's runs, and then read in the same way. Compute nodes often have
+# no internet access: run the download once from a node that has it (README.md, "Data").
+HF_NAME = "1aurent/PatchCamelyon"
+HF_REVISION = "e4bd149e7a868a9d811fdd9f9a9fb78c05c104ab"
+data_dir = "./pcam_data/"
+if not any(Path(data_dir).rglob("*.arrow")):
+    print(f"No PCam cache in {data_dir}: downloading {HF_NAME} (revision {HF_REVISION[:7]}) into it.")
+    load_dataset(HF_NAME, revision=HF_REVISION, cache_dir=data_dir)
+hf = load_dataset(data_dir)
+
+class HuggingFacePCam(Dataset):
+    def __init__(self, hf_split, transform=None):
+        self.ds = hf_split
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        item = self.ds[int(idx)]
+        img = item["image"]
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(img)
+        label = int(item["label"])
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
+# Create a single, unified dataset
+full_dataset = ConcatDataset([
+    HuggingFacePCam(hf["train"], transform=transform),
+    HuggingFacePCam(hf["validation"], transform=transform)
+])
+
+print(f"Loaded Hugging Face PCam dataset. Total samples: {len(full_dataset)}")
+
+# %% [markdown]
+# ## Model Definition
+
+# %%
+class ViTFeatureExtractor(nn.Module):
+    """Wraps a torchvision ViT to return the CLS token as a [B, D] feature vector."""
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        x = self.model._process_input(x)
+        batch_class_token = self.model.class_token.expand(x.shape[0], -1, -1)
+        x = torch.cat([batch_class_token, x], dim=1)
+        x = self.model.encoder(x)
+        return x[:, 0]  # CLS token, shape [B, hidden_dim]
+
+def get_model_features(backbone, **kwargs):
+    """Get a feature extractor model from torchvision."""
+    backbone_dict = {model: getattr(torch_models, model) for model in get_available_models()}
+    if backbone not in backbone_dict:
+        raise ValueError(f"Backbone `{backbone}` is not supported.")
+
+    # Use the new 'weights' parameter for pretrained models
+    model = backbone_dict[backbone](weights='IMAGENET1K_V1')
+
+    if _is_vit(backbone):
+        return ViTFeatureExtractor(model)
+    elif "resnet" in backbone or "resnext" in backbone:
+        return nn.Sequential(*list(model.children())[:-2])
+    elif "densenet" in backbone or "mobilenet" in backbone or "alexnet" in backbone:
+        return model.features
+    elif "inception_v3" in backbone or "googlenet" in backbone:
+        # Inception_v3 needs special handling for aux logits during training
+        if backbone == "inception_v3" and kwargs.get('aux_logits', True):
+             # Return a model that can handle aux logits
+            return nn.Sequential(*list(model.children())[:-1])
+        return nn.Sequential(*list(model.children())[:-3])
+    raise ValueError(f"Feature extraction logic not defined for {backbone}")
+
+class CNN_Patch_Model(nn.Module):
+    """A classification model using a torchvision backbone."""
+    def __init__(self, backbone, nr_classes=2):
+        super().__init__()
+        self.backbone_name = backbone
+        is_inception = backbone == "inception_v3"
+        self.feat_extract = get_model_features(backbone, aux_logits=is_inception)
+        self.pool = nn.Identity() if _is_vit(backbone) else nn.AdaptiveAvgPool2d((1, 1))
+
+        with torch.no_grad():
+            if is_inception:
+                dummy_size = 299
+            elif _is_vit(backbone):
+                dummy_size = 224
+            else:
+                dummy_size = 96
+            dummy_input = torch.rand(2, 3, dummy_size, dummy_size)
+            out_features_shape = self.feat_extract(dummy_input)
+            # Handle tuple output from InceptionV3
+            if isinstance(out_features_shape, tuple):
+                out_features_shape = out_features_shape[0]
+            out_features = out_features_shape.shape[1]
+
+        self.classifier = nn.Linear(out_features, nr_classes)
+
+    def forward(self, imgs):
+        # Handle InceptionV3 aux logits during training
+        if self.backbone_name == "inception_v3" and self.training:
+            output = self.feat_extract(imgs)
+            # In training, InceptionV3 returns InceptionOutputs(logits, aux_logits)
+            # We only use the main logits for classification head
+            feat = output.logits
+        else:
+            feat = self.feat_extract(imgs)
+
+        if _is_vit(self.backbone_name):
+            logit = self.classifier(feat)
+        else:
+            pooled_feat = self.pool(feat)
+            flat_feat = torch.flatten(pooled_feat, 1)
+            logit = self.classifier(flat_feat)
+        return logit
+
+# %% [markdown]
+# ## Training and Evaluation Functions
+
+# %%
+def train_model(model, dataloaders, criterion, optimizer, num_epochs, backbone_name, device):
+    best_model_wts = model.state_dict()
+    best_acc = 0.0
+
+    for epoch in range(num_epochs):
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        for phase in ["train", "valid"]:
+            model.train() if phase == "train" else model.eval()
+
+            running_loss = 0.0
+            running_corrects = 0
+            dataset_size = len(dataloaders[phase].dataset)
+
+            for inputs, labels in dataloaders[phase]:
+                if model.backbone_name == "inception_v3":
+                    inputs = transforms.functional.resize(inputs, [299, 299])
+                elif _is_vit(model.backbone_name):
+                    inputs = transforms.functional.resize(inputs, [224, 224])
+                inputs, labels = inputs.to(device), labels.to(device)
+                optimizer.zero_grad()
+                with torch.set_grad_enabled(phase == "train"):
+                    outputs = model(inputs)
+                    _, preds = torch.max(outputs, 1)
+                    loss = criterion(outputs, labels)
+                    if phase == "train":
+                        loss.backward()
+                        optimizer.step()
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
+
+            epoch_loss = running_loss / dataset_size
+            epoch_acc = running_corrects.double() / dataset_size
+            print(f"{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
+
+            if phase == 'valid' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
+
+    print(f"Finished training {backbone_name}. Best valid Acc: {best_acc:4f}")
+    model.load_state_dict(best_model_wts)
+    return model
+
+def evaluate_model(model, dataloader, criterion, device, set_name,
+                   return_per_sample=False):
+    model.eval()
+    start_time = time.time()
+
+    # Accumulate per-sample probabilities and labels so every scalar metric
+    # (accuracy, NLL, Brier) is computed from the same arrays. Memory is tiny
+    # (largest set ~50k x n_classes floats).
+    all_probs = []
+    all_labels = []
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            if model.backbone_name == "inception_v3":
+                inputs = transforms.functional.resize(inputs, [299, 299])
+            elif _is_vit(model.backbone_name):
+                inputs = transforms.functional.resize(inputs, [224, 224])
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            probs = torch.softmax(outputs, dim=1)
+            all_probs.append(probs.cpu())
+            all_labels.append(labels.cpu())
+
+    eval_time = time.time() - start_time
+
+    all_probs = torch.cat(all_probs).numpy()          # shape [N, n_classes]
+    all_labels = torch.cat(all_labels).numpy()        # shape [N]
+    n_classes = all_probs.shape[1]
+
+    preds = all_probs.argmax(axis=1)
+    acc = float(np.mean(preds == all_labels))
+
+    # NLL = mean cross-entropy = mean of -log p(true class).
+    eps = 1e-12
+    true_class_probs = all_probs[np.arange(len(all_labels)), all_labels]
+    nll = float(np.mean(-np.log(true_class_probs + eps)))
+
+    # Multiclass Brier score: mean over samples of sum_c (p_c - onehot_c)^2.
+    # For two classes this is the two-class Brier without the 1/2 factor.
+    onehot = np.eye(n_classes)[all_labels]
+    brier = float(np.mean(np.sum((all_probs - onehot) ** 2, axis=1)))
+
+    print(f"Accuracy on {set_name}: {acc:.4f}, NLL: {nll:.4f}, "
+          f"Brier: {brier:.4f}, Time: {eval_time:.2f}s")
+    # `loss` is the mean cross-entropy, i.e. the NLL, kept under its first name for the earlier runs' columns.
+    result = {"accuracy": acc, "loss": nll, "nll": nll, "brier": brier, "runtime": eval_time}
+    if return_per_sample:
+        # Per-sample loss for each metric, aligned with the dataloader order (which,
+        # for the test fold, is the order of `test_ids`). Brier = per-sample squared
+        # error of the probability vector — the direct analog of the regression
+        # objective's squared error; nll = per-sample cross-entropy; err01 = 0/1
+        # misclassification (the per-sample loss behind accuracy).
+        per_sample = {
+            "brier": np.sum((all_probs - onehot) ** 2, axis=1),
+            "nll": -np.log(true_class_probs + eps),
+            "err01": (preds != all_labels).astype(float),
+        }
+        return result, per_sample
+    return result
+
+
+def _pairwise_oof_icc(loss_by_fold, ids_by_fold):
+    """Study-only OOF-intersection ICC of a per-sample loss across CV folds.
+
+    Mirrors ``_oof_intersection_icc`` of simulated/objective.py: for every pair
+    of folds, restrict to the study points both folds held out (the intersection
+    of their test-index sets), take cov / mean-var of the per-sample loss on those
+    shared points, and average over pairs. rho = mean(cov) / mean(var). Pairs that
+    share fewer than 2 points are skipped (e.g. disjoint KFold folds within a
+    repeat). Returns (rho, n_pairs, mean_intersection_size).
+    """
+    id_to_loss = [dict(zip(np.asarray(ids).tolist(), np.asarray(loss)))
+                  for ids, loss in zip(ids_by_fold, loss_by_fold)]
+    covs, vars_, sizes = [], [], []
+    n_folds = len(ids_by_fold)
+    for k in range(n_folds):
+        for ell in range(k + 1, n_folds):
+            shared = np.intersect1d(np.asarray(ids_by_fold[k]),
+                                    np.asarray(ids_by_fold[ell]), assume_unique=True)
+            if shared.size < 2:
+                continue
+            qk = np.array([id_to_loss[k][int(i)] for i in shared])
+            ql = np.array([id_to_loss[ell][int(i)] for i in shared])
+            pair_cov = np.cov(qk, ql)
+            cov = float(pair_cov[0, 1])
+            var = float(0.5 * (pair_cov[0, 0] + pair_cov[1, 1]))
+            if not (np.isfinite(cov) and np.isfinite(var)):
+                continue
+            covs.append(cov)
+            vars_.append(var)
+            sizes.append(int(shared.size))
+    if not covs:
+        return np.nan, 0, np.nan
+    var_mean = float(np.mean(vars_))
+    rho = float(np.mean(covs) / var_mean) if var_mean > 0 else 0.0
+    return rho, int(len(covs)), float(np.mean(sizes))
+
+
+def _oof_anova(loss_by_fold, ids_by_fold):
+    """Per-sample OOF variance decomposition of a per-sample loss across folds.
+
+    Mirrors ``_oof_anova_summary`` of simulated/objective.py: every study point
+    is observed out-of-fold on the folds where it is in the test part (an
+    unbalanced one-way layout). Over the points seen at least twice:
+    fold_var = mean per-sample unbiased variance across folds (training-driven
+    component), sample_var = variance across samples of the per-sample mean,
+    minus the fold noise it carries (sample-driven component: label noise +
+    shared bias), icc = sample_var / (sample_var + fold_var).
+    Returns (sample_var, fold_var, icc, n_seen_twice, mean_oof_count).
+    """
+    sums, sumsq, count = {}, {}, {}
+    for ids, loss in zip(ids_by_fold, loss_by_fold):
+        for i, v in zip(np.asarray(ids).tolist(), np.asarray(loss, dtype=float)):
+            sums[i] = sums.get(i, 0.0) + v
+            sumsq[i] = sumsq.get(i, 0.0) + v * v
+            count[i] = count.get(i, 0) + 1
+    if not count:
+        return np.nan, np.nan, np.nan, 0, np.nan
+    c_all = np.array(list(count.values()), dtype=float)
+    keys = [k for k, n in count.items() if n >= 2]
+    if len(keys) < 2:
+        return np.nan, np.nan, np.nan, len(keys), float(np.mean(c_all))
+    cc = np.array([count[k] for k in keys], dtype=float)
+    s = np.array([sums[k] for k in keys])
+    ss = np.array([sumsq[k] for k in keys])
+    means = s / cc
+    within = np.clip((ss - cc * means ** 2) / (cc - 1), 0.0, None)
+    fold_var = float(np.mean(within))
+    sample_var = max(float(np.var(means, ddof=1) - np.mean(within / cc)), 0.0)
+    total = sample_var + fold_var
+    icc = float(sample_var / total) if total > 0 else np.nan
+    return sample_var, fold_var, icc, int(len(keys)), float(np.mean(c_all))
+
+# %% [markdown]
+# ## Cross-validation Training Loop
+
+# %%
+all_results = []
+
+# Extract all labels for stratified splitting
+print("Extracting labels for stratification...")
+if Path("./pcam_data/all_labels.npz").exists():
+    labels_data = np.load("./pcam_data/all_labels.npz")
+    all_labels = labels_data['labels']
+else:
+    Path("./pcam_data").mkdir(exist_ok=True)
+    all_labels = np.array([label for _, label in full_dataset])
+    np.savez("./pcam_data/all_labels.npz", labels=all_labels)
+print(f"Total labels extracted: {len(all_labels)}")
+
+# Split the full dataset into the benchmarking set and the pool of the study sets (the same for every seed)
+benchmarking_indices, leftout_indices = train_test_split(
+    np.arange(len(full_dataset)),
+    test_size=50000,
+    stratify=all_labels,
+    random_state=42
+)
+if args.bench_max_samples and len(benchmarking_indices) > args.bench_max_samples:
+    # Fixed stratified subset of the benchmarking set (same subset for every fold,
+    # seed and model of a run and across runs): a cheaper oracle, see --bench-max-samples.
+    benchmarking_indices, _ = train_test_split(
+        benchmarking_indices,
+        train_size=args.bench_max_samples,
+        stratify=np.asarray(all_labels)[benchmarking_indices],
+        random_state=43,
+    )
+    print(f"Benchmarking set subsampled to {len(benchmarking_indices)} samples (--bench-max-samples).")
+benchmarking_set = Subset(full_dataset, benchmarking_indices)
+benchmarking_loader = torch.utils.data.DataLoader(
+    benchmarking_set, batch_size=512,
+    shuffle=False, pin_memory=True, num_workers=8
+)
+print(f"Benchmarking set size: {len(benchmarking_set)}")
+print(f"Pool for study sets size: {len(leftout_indices)}")
+
+for seed in seeds:
+    for n_splits in n_splits_values:
+        if cv_method == "repeated_kfold":
+            k_folds = round(1 / test_size)
+            n_repeats = n_splits // k_folds
+            kfold_cls = RepeatedStratifiedKFold if do_stratify else RepeatedKFold
+            ss = kfold_cls(n_splits=k_folds, n_repeats=n_repeats, random_state=seed)
+        else:
+            shuffle_cls = StratifiedShuffleSplit if do_stratify else ShuffleSplit
+            ss = shuffle_cls(n_splits=n_splits, test_size=test_size, random_state=seed)
+        for backbone in backbone_list:
+            for train_size in study_set_sizes:
+                # The CLI value is the train(+validation) size the model uses.
+                # The study set additionally holds the rotating CV test fold, so
+                # the actual study pool is larger by 1/(1-test_size): with
+                # test_size=1/5 each fold leaves train+val = 4/5 * pool = train_size.
+                study_size = round(train_size / (1.0 - test_size))
+                print(f'\n{"="*40}\nStarting {backbone} with train size {train_size} '
+                      f'(study pool {study_size}), n_splits {n_splits}, seed {seed}\n{"="*40}\n')
+
+                leftout_labels = np.array(all_labels)[leftout_indices]
+
+                # Split the pool into 'study set' and 'unused/hidden set'
+                hidden_indices_relative = []
+                if study_size < len(leftout_indices):
+                    study_indices_relative, hidden_indices_relative = train_test_split(
+                        np.arange(len(leftout_indices)), train_size=study_size,
+                        stratify=leftout_labels, random_state=seed
+                    )
+                else:
+                    study_indices_relative = np.arange(len(leftout_indices))
+                    # If study size equals pool size, there is no hidden set
+
+                study_indices_absolute = leftout_indices[study_indices_relative]
+                study_set_for_split = Subset(full_dataset, study_indices_absolute)
+
+                # Labels for the study set; passed to the outer CV splitter so
+                # stratified variants can balance folds. Non-stratified splitters
+                # accept and ignore `y`, keeping the call form uniform.
+                study_labels = np.array(all_labels)[study_indices_absolute]
+
+                # Accumulate this (seed, n_splits, model, study_size) group's result
+                # rows and per-fold per-sample test losses, so the study-only
+                # OOF-intersection redundancy can be computed across folds after the
+                # fold loop and written back onto every fold row of the group.
+                group_entries = []
+                fold_test_ids, fold_brier, fold_nll, fold_err01 = [], [], [], []
+
+                for fold, (train_val_ids, test_ids) in enumerate(
+                    ss.split(np.zeros(len(study_set_for_split)), study_labels)):
+                    print(f'--- Seed {seed} | n_splits {n_splits} | Train Size {train_size} (study pool {study_size}) | Fold {fold+1}/{n_splits} ---')
+                    torch.manual_seed(seed)
+                    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+
+                    # Split the train_val_ids further into train and validation
+                    train_val_labels = np.array(all_labels)[np.array(study_indices_absolute)[train_val_ids]]
+
+                    # Calculate the proportion of the validation set relative to the combined train+validation set
+                    validation_proportion = valid_size / (1.0 - test_size)
+
+                    train_ids_rel, valid_ids_rel = train_test_split(
+                        np.arange(len(train_val_ids)),
+                        test_size=validation_proportion,
+                        random_state=seed,
+                        stratify=train_val_labels
+                    )
+                    train_ids = train_val_ids[train_ids_rel]
+                    valid_ids = train_val_ids[valid_ids_rel]
+
+                    train_subset = Subset(study_set_for_split, train_ids)
+                    valid_subset = Subset(study_set_for_split, valid_ids)
+                    test_subset = Subset(study_set_for_split, test_ids)
+                    print(f"Train set size: {len(train_subset)}, Validation set size: {len(valid_subset)}, Test set size: {len(test_subset)}")
+
+                    loaders_dict = {
+                        'train': DataLoader(train_subset, batch_size=BatchSize, shuffle=True, pin_memory=True, num_workers=4),
+                        'valid': DataLoader(valid_subset, batch_size=BatchSize, shuffle=False, pin_memory=True, num_workers=4),
+                        'test': DataLoader(test_subset, batch_size=BatchSize, shuffle=False, pin_memory=True, num_workers=4)
+                    }
+
+                    model_ = CNN_Patch_Model(backbone, nr_classes=2).to(device)
+                    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model_.parameters()))
+                    split_backbone_name = f'{backbone}-study_{study_size}-seed_{seed}-split_{fold+1}'
+
+                    train_start_time = time.time()
+                    trained_model = train_model(
+                        model_, loaders_dict, loss_function, optimizer,
+                        num_epochs=epochs, backbone_name=split_backbone_name, device=device
+                    )
+                    train_runtime = time.time() - train_start_time
+
+                    val_metrics = evaluate_model(trained_model, loaders_dict['valid'], loss_function, device, f"Validation Fold {fold+1} Set")
+                    test_metrics, test_per_sample = evaluate_model(
+                        trained_model, loaders_dict['test'], loss_function, device,
+                        f"Test Fold {fold+1} Set", return_per_sample=True)
+                    bench_metrics = evaluate_model(trained_model, benchmarking_loader, loss_function, device, "Benchmarking Set")
+
+                    # Per-fold per-sample test losses, keyed by study-relative test
+                    # index, for the across-fold redundancy computed after the loop.
+                    fold_test_ids.append(np.asarray(test_ids))
+                    fold_brier.append(test_per_sample["brier"])
+                    fold_nll.append(test_per_sample["nll"])
+                    fold_err01.append(test_per_sample["err01"])
+
+                    # --- Outer set ('hidden' chunks): first split with CV, every split without ---
+                    hidden_test_accuracies = []
+                    hidden_test_losses = []
+                    hidden_test_nlls = []
+                    hidden_test_briers = []
+
+                    if len(hidden_indices_relative) > 0 and (not do_cross_validation or fold == 0):
+                        print("Evaluating on Hidden Test Set subsets...")
+                        hidden_indices_absolute = leftout_indices[hidden_indices_relative]
+
+                        target_chunk_size = len(test_subset)
+                        if target_chunk_size > 0:
+                            num_chunks = len(hidden_indices_absolute) // target_chunk_size
+                            if num_chunks > 200: # Limit to 200 subsets max
+                                print(f"Note: Limiting hidden test set evaluation to 200 subsets (out of {num_chunks} possible).")
+                                num_chunks = 200
+
+                            # Chunk the hidden set the SAME way the outer CV splits the
+                            # study set: stratified (class-balanced) chunks when
+                            # do_stratify, plain contiguous slices otherwise. This keeps
+                            # the no-CV growth-curve baseline drawn like the CV test folds;
+                            # without it, unbalanced chunks make the growth curve noisy /
+                            # non-monotonic and inflate the sample gain for NLL/Brier.
+                            if do_stratify:
+                                hidden_labels = np.array(all_labels)[hidden_indices_absolute]
+                                rng = np.random.RandomState(seed)
+                                classes, counts = np.unique(hidden_labels, return_counts=True)
+                                pools = {c: rng.permutation(np.where(hidden_labels == c)[0]) for c in classes}
+                                quota = np.floor(counts / counts.sum() * target_chunk_size).astype(int)
+                                while quota.sum() < target_chunk_size:  # top up to exact size
+                                    quota[np.argmax(counts / counts.sum() * target_chunk_size - quota)] += 1
+                                num_chunks = min(num_chunks,
+                                                 min(len(pools[c]) // q for c, q in zip(classes, quota) if q > 0))
+                                cursors = {c: 0 for c in classes}
+                                chunk_list = []
+                                for _ in range(num_chunks):
+                                    sel = []
+                                    for c, q in zip(classes, quota):
+                                        sel.extend(pools[c][cursors[c]:cursors[c] + q]); cursors[c] += q
+                                    chunk_list.append(hidden_indices_absolute[np.array(sel, dtype=int)])
+                            else:
+                                chunk_list = [hidden_indices_absolute[i*target_chunk_size:(i+1)*target_chunk_size]
+                                              for i in range(num_chunks)]
+
+                            print(f"Dividing hidden set ({len(hidden_indices_absolute)} samples) into {num_chunks} "
+                                  f"{'stratified ' if do_stratify else ''}subsets of size {target_chunk_size}.")
+
+                            for i, chunk_indices in enumerate(chunk_list):
+                                chunk_subset = Subset(full_dataset, chunk_indices)
+                                chunk_loader = DataLoader(chunk_subset, batch_size=BatchSize, shuffle=False, pin_memory=True, num_workers=4)
+
+                                metrics = evaluate_model(trained_model, chunk_loader, loss_function, device, f"Hidden Test Subset {i+1}")
+                                hidden_test_accuracies.append(metrics["accuracy"])
+                                hidden_test_losses.append(metrics["loss"])
+                                hidden_test_nlls.append(metrics["nll"])
+                                hidden_test_briers.append(metrics["brier"])
+
+
+                    result_entry = {
+                        # `study_size` records the CLI train(+val) size so every
+                        # downstream size label is the chosen train size; the
+                        # larger actual study pool is kept in `study_pool_size`.
+                        # (Runs before 2026-08-01 recorded the study-set size
+                        # here and had no `study_pool_size`.)
+                        "model": backbone, "study_size": train_size,
+                        "study_pool_size": study_size,
+                        "n_splits": n_splits, "seed": seed, "fold": fold + 1,
+                        "cross_validation": do_cross_validation,
+                        "cv_method": cv_method,
+                        "stratified": do_stratify,
+                        "train_runtime": train_runtime,
+                        "val_accuracy": val_metrics["accuracy"], "val_loss": val_metrics["loss"],
+                        "val_nll": val_metrics["nll"], "val_brier": val_metrics["brier"],
+                        "val_runtime": val_metrics["runtime"],
+                        "test_accuracy": test_metrics["accuracy"], "test_loss": test_metrics["loss"],
+                        "test_nll": test_metrics["nll"], "test_brier": test_metrics["brier"],
+                        "test_runtime": test_metrics["runtime"],
+                        "benchmark_accuracy": bench_metrics["accuracy"], "benchmark_loss": bench_metrics["loss"],
+                        "benchmark_nll": bench_metrics["nll"], "benchmark_brier": bench_metrics["brier"],
+                        "benchmark_runtime": bench_metrics["runtime"],
+                        "hidden_test_accuracies": hidden_test_accuracies,
+                        "hidden_test_losses": hidden_test_losses,
+                        "hidden_test_nlls": hidden_test_nlls,
+                        "hidden_test_briers": hidden_test_briers,
+                        # Study-only OOF-intersection redundancy (rho-hat) per metric;
+                        # filled in after the fold loop (NaN for single-fold groups).
+                        # Brier fills the canonical `study_squared_error_rho_*` name to
+                        # match the regression objective (Brier = squared error).
+                        "study_squared_error_rho_all_oof_intersection": np.nan,
+                        "study_nll_rho_all_oof_intersection": np.nan,
+                        "study_error01_rho_all_oof_intersection": np.nan,
+                        "oof_intersection_pairs": np.nan,
+                        "oof_intersection_mean_size": np.nan,
+                        # Cumulative variants (additive): the row of fold k holds the
+                        # redundancy computable after the first k folds, i.e. the
+                        # early-stopping estimate seen at k splits. NaN for fold 1.
+                        "study_squared_error_rho_cum_oof_intersection": np.nan,
+                        "study_nll_rho_cum_oof_intersection": np.nan,
+                        "study_error01_rho_cum_oof_intersection": np.nan,
+                        "oof_intersection_pairs_cum": np.nan,
+                        "oof_intersection_mean_size_cum": np.nan,
+                        # Per-sample OOF ANOVA (sample-driven vs fold-driven variance of
+                        # the per-sample loss; icc = sample/(sample+fold)), cumulative
+                        # over folds 1..k on the row of fold k (NaN for fold 1), and the
+                        # K-fold value broadcast (`_all`).
+                        **{f"study_oof_anova_{m}_{q}_{v}": np.nan
+                           for m in ("squared_error", "nll", "error01")
+                           for q in ("sample_var", "fold_var", "icc")
+                           for v in ("cum", "all")},
+                        "study_oof_anova_n_samples_seen_twice_cum": np.nan,
+                        "study_oof_anova_mean_oof_count_cum": np.nan,
+                    }
+                    all_results.append(result_entry)
+                    group_entries.append(result_entry)
+                    print("-" * 25)
+
+                    del model_, trained_model, optimizer
+                    gc.collect()
+                    if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+                # ── Study-only OOF-intersection redundancy across this group's folds ──
+                # One rho-hat per metric, computed from the per-sample test losses on
+                # the study points that pairs of folds both held out. Written back onto
+                # every fold row of the group (NaN when there is only one fold, or when
+                # no fold pair shares >= 2 test points, e.g. a single KFold repeat).
+                rho_brier, n_pairs, mean_isize = _pairwise_oof_icc(fold_brier, fold_test_ids)
+                rho_nll, _, _ = _pairwise_oof_icc(fold_nll, fold_test_ids)
+                rho_err01, _, _ = _pairwise_oof_icc(fold_err01, fold_test_ids)
+                print(f"Redundancy rho-hat (OOF-intersection) | brier={rho_brier} "
+                      f"nll={rho_nll} err01={rho_err01} (pairs={n_pairs}, "
+                      f"mean intersection size={mean_isize})")
+                anova_all = {m: _oof_anova(fl, fold_test_ids) for m, fl in
+                             (("squared_error", fold_brier), ("nll", fold_nll), ("error01", fold_err01))}
+                for entry in group_entries:
+                    entry["study_squared_error_rho_all_oof_intersection"] = rho_brier
+                    entry["study_nll_rho_all_oof_intersection"] = rho_nll
+                    entry["study_error01_rho_all_oof_intersection"] = rho_err01
+                    entry["oof_intersection_pairs"] = n_pairs
+                    entry["oof_intersection_mean_size"] = mean_isize
+                    for m, (sv, fv, icc, _, _) in anova_all.items():
+                        entry[f"study_oof_anova_{m}_sample_var_all"] = sv
+                        entry[f"study_oof_anova_{m}_fold_var_all"] = fv
+                        entry[f"study_oof_anova_{m}_icc_all"] = icc
+
+                # ── Cumulative redundancy after the first k folds (additive columns) ──
+                # Same estimator restricted to folds 1..k, written on the row of fold
+                # k: what a practitioner could compute after k splits. The final
+                # broadcast columns above are unchanged (row of fold K equals them).
+                for k_idx, entry in enumerate(group_entries):
+                    k = k_idx + 1
+                    if k < 2:
+                        continue
+                    ids_k = fold_test_ids[:k]
+                    rb, npk, msk = _pairwise_oof_icc(fold_brier[:k], ids_k)
+                    rn, _, _ = _pairwise_oof_icc(fold_nll[:k], ids_k)
+                    re01, _, _ = _pairwise_oof_icc(fold_err01[:k], ids_k)
+                    entry["study_squared_error_rho_cum_oof_intersection"] = rb
+                    entry["study_nll_rho_cum_oof_intersection"] = rn
+                    entry["study_error01_rho_cum_oof_intersection"] = re01
+                    entry["oof_intersection_pairs_cum"] = npk
+                    entry["oof_intersection_mean_size_cum"] = msk
+                    for m, fl in (("squared_error", fold_brier), ("nll", fold_nll), ("error01", fold_err01)):
+                        sv, fv, icc, n2, mc = _oof_anova(fl[:k], ids_k)
+                        entry[f"study_oof_anova_{m}_sample_var_cum"] = sv
+                        entry[f"study_oof_anova_{m}_fold_var_cum"] = fv
+                        entry[f"study_oof_anova_{m}_icc_cum"] = icc
+                        entry["study_oof_anova_n_samples_seen_twice_cum"] = n2
+                        entry["study_oof_anova_mean_oof_count_cum"] = mc
+
+print("\n--- All Benchmarking Runs Finished ---")
+if all_results:
+    results_df = pd.DataFrame(all_results)
+    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    models_str = "_".join(args.model_choices)
+    nsplits_str = "_".join(map(str, args.n_splits))
+    seeds_str = f"{args.seeds[0]}-{args.seeds[1]-1}"
+    sizes_str = "_".join(map(str, args.train_sizes))
+    is_cv_str = "CV" if do_cross_validation else "NoCV"
+    strat_str = "strat" if do_stratify else "unstrat"
+
+    filename = f"pcam_results_{is_cv_str}_{cv_method}_{strat_str}_{models_str}_nsplits_{nsplits_str}_seeds_{seeds_str}_sizes_{sizes_str}_{timestamp}.parquet"
+    parquet_path = OUTPUT_DIR / filename
+
+    # Save to parquet (Pandas handles lists in columns for Parquet automatically)
+    results_df.to_parquet(parquet_path)
+    print(f"\nResults saved to {parquet_path}")
+    print("\n--- Results Summary ---")
+    print(results_df.to_string())
+else:
+    print("No results were generated.")
+
+# %%
