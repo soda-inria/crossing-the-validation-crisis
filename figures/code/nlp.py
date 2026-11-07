@@ -328,6 +328,18 @@ def _plot_yelp_pairwise_score_distributions(
     ax.set_ylabel("Test accuracy")
     ax.grid(axis="y", color="0.88", linewidth=0.8)
     sns.despine(ax=ax)
+    # Figure 7(b): an arrow to the lowest single-split score of XLM-RoBERTa (a learning failure), which is hard to see
+    # among the dots, when it lies far below the other runs; the label sits in the empty band under the legend
+    xlmr = MODEL_DISPLAY_NAMES["roberta"]
+    single_xlmr = dist_df[(dist_df["K"] == "1") & (dist_df["model"] == xlmr)]["score"]
+    if not single_xlmr.empty and single_xlmr.min() < single_xlmr.median() - 0.15:
+        y_low = float(single_xlmr.min())
+        dots = [o for c in ax.collections for o in c.get_offsets() if abs(o[1] - y_low) < 1e-12]
+        if dots:
+            ax.annotate("XLM-RoBERTa's outliers", xy=(dots[0][0] + 0.05, y_low), xytext=(0.62, y_low),
+                        color=palette[xlmr], fontsize=8.1, ha="left", va="center",
+                        path_effects=P._white_text_halo(),
+                        arrowprops=dict(arrowstyle="->", color=palette[xlmr], linewidth=1.0, shrinkA=2, shrinkB=1))
 
     train_size = int(study_size * 0.8)
     for stem in [f"violin_plot_study_size_{study_size}",
