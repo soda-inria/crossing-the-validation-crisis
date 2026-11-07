@@ -7,7 +7,8 @@ for the simulated panel, pcam.py for PCam, regen_real_data_gain_figures.py fig5_
   --sim-tables   tables/ of paper_style_figs.py (fig4.parquet)
   --real-tables  tables/ of regen_real_data_gain_figures.py (pcam_accuracy.parquet, nlp_delta_aligned_with_qwen.parquet)
   --common-axis  off: draws each panel with its own axis (must reproduce the scripts' PDFs; a check)
-Writes the three PDFs under their paper names to --out-dir.
+Writes the three PDFs under their paper names (fig5_gain_simulated.pdf, fig5_gain_pcam.pdf, fig5_gain_yelp.pdf) to
+--out-dir.
 """
 import argparse
 import os
@@ -26,11 +27,12 @@ import seaborn as sns
 import nlp
 import pcam
 import pipeline_common as C
+import paper_names as N
 import plot as P
 
-NAMES = {"sim": "aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_K20.pdf",
-         "pcam": "aggregated_test_gain_k_400_delta_linear_accuracy_stratFalse.pdf",
-         "yelp": "aggregated_test_gain_k_1000_delta_linear.pdf"}
+NAMES = {"sim": N.FIG5_SIM, "pcam": N.FIG5_PCAM, "yelp": N.FIG5_YELP}      # the paper's file names
+SRC = {"pcam": "aggregated_test_gain_k_400_delta_linear_accuracy_stratFalse.pdf",  # names given by the plotting calls
+       "yelp": "aggregated_test_gain_k_1000_delta_linear.pdf"}
 BASE = ["ExtraTrees", "MLP", "Ridge", "RandomFeatures"]
 
 
@@ -98,7 +100,7 @@ def draw_all(s, p, y, out, ylim=None, yticks=None, shared_layout=False):
                                      model_display_names=pcam.MODEL_DISPLAY_NAMES, model_color_map=None,
                                      title_prefix="PCam", plots_dir=work, xticks=[1, 5, 10, 15, 20],
                                      file_suffix="_accuracy_stratFalse")
-    os.replace(f"{work}/{NAMES['pcam']}", f"{out}/{NAMES['pcam']}")
+    os.replace(f"{work}/{SRC['pcam']}", f"{out}/{NAMES['pcam']}")
     # Yelp (regen_real_data_gain_figures.fig5_yelp_aligned, the combined table with Qwen3-0.6B)
     P.set_paper_style()
     P.GAIN_DISPLAY["hairlines"] = 20
@@ -108,7 +110,7 @@ def draw_all(s, p, y, out, ylim=None, yticks=None, shared_layout=False):
                                      model_display_names=nlp.MODEL_DISPLAY_NAMES,
                                      model_color_map={"bert": tab10[0], "roberta": tab10[1], "qwen3-0.6b": tab10[2]},
                                      title_prefix="Yelp", plots_dir=work)
-    os.replace(f"{work}/{NAMES['yelp']}", f"{out}/{NAMES['yelp']}")
+    os.replace(f"{work}/{SRC['yelp']}", f"{out}/{NAMES['yelp']}")
     P.GAIN_DISPLAY["ylim"] = P.GAIN_DISPLAY["yticks"] = None
     P.GAIN_DISPLAY["figsize"] = P.GAIN_DISPLAY["axes_box_pt"] = None
     P.GAIN_DISPLAY["hide_ylabel"] = False

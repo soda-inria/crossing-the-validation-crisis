@@ -76,7 +76,8 @@ scripts write to `simulated/analysis/out_<name>/`.
 ## Figures and tables of the paper
 
 Scripts are in `figures/` unless the path says otherwise; [figures/README.md](figures/README.md) gives the order in
-which to run them. Configurations are in `simulated/configs/`, `pcam/configs/` and `yelp/configs/`; the simulated
+which to run them, and the file name under which each figure is written: the name that the LaTeX source of the paper
+includes. Configurations are in `simulated/configs/`, `pcam/configs/` and `yelp/configs/`; the simulated
 analysis scripts run from `simulated/`.
 
 | Paper | Runs | Script |

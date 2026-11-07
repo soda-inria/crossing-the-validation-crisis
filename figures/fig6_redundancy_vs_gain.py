@@ -16,8 +16,8 @@ Data:
 Same figure size as the published PDF (MediaBox 238.79 x 224.40 pt): the page is cropped to the tight box of the figure
 WITHOUT the key boxes (plus the usual 0.1 in), and the script asserts that the key boxes lie inside it.
 The PCam tables are read from the pcam/ folder ($PCAM_DIR, else pcam/ of this repository). Usage:
-    python fig6_redundancy_vs_gain.py --yelp fig6_yelp_points.csv --out OUT/redundancy_vs_gain_all_k3.pdf
-    python fig6_redundancy_vs_gain.py --out OUT/redundancy_vs_gain_all_k3.pdf          # variant without Yelp
+    python fig6_redundancy_vs_gain.py --yelp fig6_yelp_points.csv --out OUT/fig6_redundancy_vs_gain.pdf
+    python fig6_redundancy_vs_gain.py --out OUT/fig6_without_yelp.pdf               # variant without Yelp
 """
 from __future__ import annotations
 

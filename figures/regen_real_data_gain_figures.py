@@ -8,24 +8,26 @@ line and 20 of 1,000 bootstrap resamples of the seeds (random_state 0) as thin l
 of draws, for checks). The chunk order used is passed to the pcam.py / nlp.py subprocesses in $GAIN_CHUNK_ORDER and
 appended to OUT/CHUNK_ORDER.txt. Keys of --only, what each writes to --out-dir, and the runs it reads under the data root:
 
-  fig5_pcam                    Figure 5 (middle)  aggregated_test_gain_k_400_delta_linear_accuracy_stratFalse.pdf
+  fig5_pcam                    Figure 5 (middle)  fig5_gain_pcam_own_axis.pdf
                                                   (pcam.py on pcam/results_output_pcam; its plots also hold Figure 2)
   fig5_yelp                    first Yelp runs    aggregated_test_gain_k_1000_delta_linear.pdf
                                                   (nlp.py on nlp/yelp_runs_a, nlp/yelp_runs_b, nlp/yelp_qwen3_0.6b)
-  fig5_yelp_aligned            Figure 5 (right),  aligned/aggregated_test_gain_k_1000_delta_linear.pdf,
-                               Figure 7           aligned/retrieval_best_*.pdf (Wilson intervals, code/nlp.py),
-                                                  aligned/violin_plot_study_size_3750.pdf
+  fig5_yelp_aligned            Figure 5 (right),  fig5_gain_yelp_own_axis.pdf,
+                               Figure 7           fig7a_ranking_retrieval_yelp.pdf (Wilson intervals, code/nlp.py),
+                                                  fig7b_test_scores_yelp.pdf; the retrieval curves of the other
+                                                  size in aligned/
                                                   (nlp.py on nlp/yelp_aligned, with the Qwen3-0.6B rows of fig5_yelp)
-  figF1 (pcam_cv_procedures)   Figure I.1         aggregated_test_gain_k_300_delta_linear_cv_procedures.pdf
+  figF1 (pcam_cv_procedures)   Figure I.1         figI1_gain_mccv_vs_repeated_kfold.pdf
                                                   (pcam/results_output_pcam)
-  figK1 (pcam_stratification)  Figure J.1         aggregated_test_gain_k_500_delta_linear_nll_vs_strat_baseline.pdf
+  figK1 (pcam_stratification)  Figure J.1         figJ1_gain_stratified_vs_unstratified.pdf
                                                   (pcam/stratandnewmetrics)
-  figL1 (pcam_metrics)         Figure K.1         sample_gain_by_metric_wide_resnet101_2_N500_stratTrue.pdf
+  figL1 (pcam_metrics)         Figure K.1         figK1_gain_by_metric.pdf
                                                   (pcam/stratandnewmetrics)
 
 The keys figF1, figK1 and figL1 follow the LaTeX labels of the paper's gain tables (tab:ci-figF1, tab:ci-figK1 and
 tab:ci-figL1, printed as Tables E.5, E.6 and E.7), which predate the current appendix letters; the names in brackets
-are aliases. The gain tables go to OUT/tables/ (read by ci_appendix.py and figD1_rho_delta.py).
+are aliases. The figures of the paper take the names of its LaTeX source (code/paper_names.py); Figure 5 itself is
+redrawn on one axis by fig5_common_axis.py. The gain tables go to OUT/tables/ (read by ci_appendix.py and figD1_rho_delta.py).
 
 Usage:
     python regen_real_data_gain_figures.py --out-dir OUT [--data-root DATA] [--only fig5_pcam ...]
@@ -66,7 +68,9 @@ def run_pipeline(code_dir, script, args, work, plots):
 def fig5_pcam(code_dir, data, out):
     work = os.path.join(out, "work", "pcam"); plots = os.path.join(work, "plots")
     run_pipeline(code_dir, "pcam.py", ["--data-dir", os.path.join(data, "pcam", "results_output_pcam")] + PIPE_ARGS + ["--save-gains", os.path.join(out, "tables")], work, plots)
-    shutil.copy(os.path.join(plots, "aggregated_test_gain_k_400_delta_linear_accuracy_stratFalse.pdf"), out)
+    import paper_names as N
+    shutil.copy(os.path.join(plots, "aggregated_test_gain_k_400_delta_linear_accuracy_stratFalse.pdf"),
+                os.path.join(out, N.FIG5_PCAM_OWN_AXIS))
 
 
 def fig5_yelp(code_dir, data, out):
@@ -81,7 +85,7 @@ def fig5_yelp_aligned(code_dir, data, out):
     XLM-RoBERTa, n_tr = 1,000 and 3,000, seeds 0-49, the single split being the first split of each 20-split run (paired),
     with Qwen3-0.6B as published (its rows of the fig5_yelp gain table). nlp.py also writes the Table M.1 rows
     (work/nlp_aligned/results/pairwise_ttest_nlp.csv)."""
-    import pandas as pd, seaborn as sns, nlp, pipeline_common as C, plot as P
+    import pandas as pd, seaborn as sns, nlp, paper_names as N, pipeline_common as C, plot as P
     work = os.path.join(out, "work", "nlp_aligned"); plots = os.path.join(work, "plots")
     # quasi-oracle of Figure 7 and Table M.1: all the splits of every seed (paper) or the first split only
     qo = os.environ.get("YELP_QUASI_ORACLE", "all-splits")
@@ -106,14 +110,18 @@ def fig5_yelp_aligned(code_dir, data, out):
                                      model_color_map={"bert": tab10[0], "roberta": tab10[1], "qwen3-0.6b": tab10[2]},
                                      title_prefix="Yelp", plots_dir=combined)
     os.makedirs(os.path.join(out, "aligned"), exist_ok=True)
-    shutil.copy(os.path.join(combined, "aggregated_test_gain_k_1000_delta_linear.pdf"), os.path.join(out, "aligned"))
+    shutil.copy(os.path.join(combined, "aggregated_test_gain_k_1000_delta_linear.pdf"), os.path.join(out, N.FIG5_YELP_OWN_AXIS))
+    paper = {"retrieval_best_bert_vs_roberta_N3750.pdf": N.FIG7A, "violin_plot_study_size_3750.pdf": N.FIG7B}   # Figure 7
     for f in os.listdir(plots):
-        if f.startswith(("retrieval_best_", "violin_plot_study_size_3750")) and f.endswith(".pdf"):
+        if f in paper:
+            shutil.copy(os.path.join(plots, f), os.path.join(out, paper[f]))
+        elif f.startswith("retrieval_best_") and f.endswith(".pdf"):
             shutil.copy(os.path.join(plots, f), os.path.join(out, "aligned"))
 
 
 def figF1(code_dir, data, out):
     """Figure I.1: PCam MCCV vs Repeated 5-Fold, study set 300 (n_tr = 240), accuracy."""
+    import paper_names as N
     import pandas as pd, pcam, compute, pipeline_common as C, plot as P
     work = os.path.join(out, "work", "figF1"); os.makedirs(work, exist_ok=True)
     data_ = pcam.load_cv_data(os.path.join(data, "pcam", "results_output_pcam"))
@@ -152,11 +160,12 @@ def figF1(code_dir, data, out):
         style_order=["MCCV", "Repeated 5-fold"], dashes={"MCCV": (), "Repeated 5-fold": (4, 2)},
         palette={m: PCAM_COLORS[m] for m in order}, xticks=[1, 5, 10, 15, 20], hairlines=HAIR_FACET,
         axes_size=SINGLE_AXES, axis_label_fontsize=12,                                                  # 1 x 3 panels
-        output_path=os.path.join(out, "aggregated_test_gain_k_300_delta_linear_cv_procedures.pdf"))
+        output_path=os.path.join(out, N.FIGI1))
 
 
 def figK1(code_dir, data, out):
     """Figure J.1: PCam NLL, study set 500 (n_tr = 400), unstratified and stratified CV against the stratified baseline."""
+    import paper_names as N
     import pandas as pd, pcam, compute, pipeline_common as C, plot as P
     work = os.path.join(out, "work", "figK1"); os.makedirs(work, exist_ok=True)
     d = pcam.load_cv_data(os.path.join(data, "pcam", "stratandnewmetrics")); d = d[d.study_size == 500].copy()
@@ -188,11 +197,12 @@ def figK1(code_dir, data, out):
         style_order=["Unstratified", "Stratified"], dashes={"Unstratified": (), "Stratified": (4, 2)},
         palette={m: PCAM_COLORS[m] for m in order}, xticks=[1, 5, 10, 15, 20], hairlines=HAIR_FACET,
         ncols=2, axes_size=SINGLE_AXES, axis_label_fontsize=12,                                         # 2 x 2 panels
-        output_path=os.path.join(out, "aggregated_test_gain_k_500_delta_linear_nll_vs_strat_baseline.pdf"))
+        output_path=os.path.join(out, N.FIGJ1))
 
 
 def figL1(code_dir, data, out):
     """Figure K.1: PCam WideResNet101_2, study set 500 (n_tr = 400), stratified: gain by metric (accuracy, Brier, NLL)."""
+    import paper_names as N
     import pandas as pd, seaborn as sns, matplotlib.pyplot as plt, pcam, compute, pipeline_common as C, plot as P
     d = pcam.load_cv_data(os.path.join(data, "pcam", "stratandnewmetrics"))
     d = d[(d.model == "wide_resnet101_2") & (d.study_size == 500) & (d.stratified == True)].copy()
@@ -228,7 +238,7 @@ def figL1(code_dir, data, out):
         # top-left corner, one item per line, as on the real-data panels of Figure 5
         title_text_xy=(0.03, 0.97), title_text_ha="left", title_text_va="top", xlim=(0, 20), direct_labels=True,
         hairlines=HAIR,
-        output_path=os.path.join(out, "sample_gain_by_metric_wide_resnet101_2_N500_stratTrue.pdf"))
+        output_path=os.path.join(out, N.FIGK1))
     plt.close(fig)
     k20 = res[res.K == 20]
     est = k20[k20.bootstrap_iter < 0].groupby("metric").sample_gain.mean().round(2).to_dict()

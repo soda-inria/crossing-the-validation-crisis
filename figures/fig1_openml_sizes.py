@@ -38,18 +38,22 @@ query again). Without --cache, every run queries OpenML.
 Environment: the packages of requirements.txt, plus openml, which is needed only to query OpenML and not to
 redraw from --cache. Run in figures/:
     python fig1_openml_sizes.py --out-dir ../figs/fig1 --cache ../figs/fig1/openml_listings.npz
-The script writes top_<top-percent>_percent_histogram.pdf (top_20_percent_histogram.pdf, the paper's file name) to
---out-dir. It prints the date of the OpenML query, the size of the subset, its median number of samples and the centre
+The script writes fig1_openml_dataset_sizes.pdf, the paper's file name (top_<top-percent>_percent_histogram.pdf for
+another --top-percent than 20), to --out-dir. It prints the date of the OpenML query, the size of the subset, its median number of samples and the centre
 share.
 """
 import argparse
 import os
+import sys
 from datetime import datetime, timezone
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "code"))
+import paper_names as N  # noqa: E402
 
 SMALL = 1000  # the centre text gives the share of the subset with fewer than 1,000 samples
 # the columns of the two OpenML listings that the figure reads, and that --cache keeps
@@ -161,9 +165,14 @@ def histogram_bin_edges(max_value):
     return np.append(np.linspace(0, max_value, 11)[:-1], max_value + 1)
 
 
+def figure_name(top_percent):
+    """The paper's file name for the 20% most used datasets (Figure 1), a descriptive one otherwise."""
+    return N.FIG1 if top_percent == 20 else f"top_{top_percent}_percent_histogram.pdf"
+
+
 def plot_capped_kde_hist_for_top_x_percent(datasets, top_percent, max_value=10_000, center_text=None, out_dir="."):
     """Figure 1: histogram of the number of samples of the top_percent % most used datasets, capped at max_value, saved
-    to out_dir/top_<top_percent>_percent_histogram.pdf and then shown (plt.show(), as in the notebook). The notebook's
+    to out_dir/<figure_name(top_percent)> and then shown (plt.show(), as in the notebook). The notebook's
     name is kept, although the function draws no KDE."""
     top_x = get_popular_subset(datasets, top_percent=top_percent)
     capped_instances = top_x["NumberOfInstances"].copy()
@@ -222,7 +231,7 @@ def plot_capped_kde_hist_for_top_x_percent(datasets, top_percent, max_value=10_0
 
     plt.tight_layout()
     sns.despine()
-    plt.savefig(os.path.join(out_dir, f"top_{top_percent}_percent_histogram.pdf"), format="pdf")
+    plt.savefig(os.path.join(out_dir, figure_name(top_percent)), format="pdf")
     plt.show()
 
 
@@ -234,7 +243,7 @@ def main():
                     help="cap on the number of samples: larger datasets fall in the last bin, labelled "
                          "'<max-value>+' (default 5000)")
     ap.add_argument("--out-dir", default=".",
-                    help="where to write top_<top-percent>_percent_histogram.pdf (default: the current directory)")
+                    help="where to write the figure (default: the current directory)")
     ap.add_argument("--cache", metavar="FILE", default=None,
                     help="local .npz file (not tracked) of the two OpenML listings: read if it exists, else written "
                          "after the query, so that the figure can be redrawn without querying OpenML again")
@@ -260,7 +269,7 @@ def main():
         datasets, top_percent=args.top_percent, max_value=args.max_value,
         center_text=f"{share:.0%} have less than\n1,000 samples", out_dir=args.out_dir
     )
-    print("wrote", os.path.join(args.out_dir, f"top_{args.top_percent}_percent_histogram.pdf"))
+    print("wrote", os.path.join(args.out_dir, figure_name(args.top_percent)))
 
 
 if __name__ == "__main__":

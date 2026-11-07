@@ -7,7 +7,7 @@ of compute.sample_gain_bootstrap. The K-split variances are those of the first K
 The figure keeps the design of the previous version (x axis to 12 with ticks 1, 3, 6, 12, G^test_K marked under the
 axis at each crossing), with the labels placed off the curve. Writes, to --out-dir:
   fig2_curves.csv                                          V1(alpha) (average and stored order) and V_K
-  pedagogical_variance_diagnostic_delta_mobilenet_v2_N500_MCCV_paper_style.pdf  the figure (--chunk-order average)
+  fig2_variance_vs_test_size.pdf                           the figure (--chunk-order average)
 and prints the crossings (linear interpolation, as drawn) and the paper estimator's G_5, G_10, G_20 (log-log).
 --from-csv redraws from fig2_curves.csv without reading the runs.
 """
@@ -25,9 +25,10 @@ import pandas as pd
 
 import compute
 import datapaths
+import paper_names
 import plot as P
 
-NAME = "pedagogical_variance_diagnostic_delta_mobilenet_v2_N500_MCCV_paper_style.pdf"
+NAME = paper_names.FIG2
 XLABEL = "How many times more test data a\nsingle split needs to match CV variance"
 TARGET_PT = (235.620667, 204.666626 - 10.5)   # previous PDF size, one label row (10.5 pt) shorter since the three
                                               # G^test labels share one row; same width, so the same page scale

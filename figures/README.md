@@ -35,7 +35,7 @@ python regen_real_data_gain_figures.py --out-dir ../figs/real
 python fig5_common_axis.py --sim-tables ../figs/sim/tables --real-tables ../figs/real/tables --out-dir ../figs/fig5
 python fig2_pedagogical.py --out-dir ../figs/fig2
 python fig6_yelp_points.py    # writes fig6_yelp_points.csv here; needs the PCam round-3 tables (see the table below)
-python fig6_redundancy_vs_gain.py --yelp fig6_yelp_points.csv --out ../figs/fig6/redundancy_vs_gain_all_k3.pdf
+python fig6_redundancy_vs_gain.py --yelp fig6_yelp_points.csv --out ../figs/fig6/fig6_redundancy_vs_gain.pdf
 python figD1_rho_delta.py --out-dir ../figs/figD1
 python ci_appendix.py > ../figs/ci_tables.tex
 ```
@@ -60,6 +60,29 @@ per-process CPU-time limit; `--from-results` assembles the parts.
 | `code/ranking.py` | Figure O.1 (ranking-equivalent sample gain), from the 12 ranking runs |
 | `code/replicability.py` | Table N.1 (significance within one CV run) |
 | `coherence_checks/` | the scripts behind other numbers of the text; see its README |
+
+## File names of the figures
+
+Each figure of the paper is written under the name that the LaTeX source of the paper includes (`Images/<name>`); the
+names are listed in `code/paper_names.py`.
+
+| Paper | File | Written by |
+|---|---|---|
+| Figure 1 | `fig1_openml_dataset_sizes.pdf` | `fig1_openml_sizes.py` |
+| Figure 2 | `fig2_variance_vs_test_size.pdf` | `fig2_pedagogical.py` |
+| Figure 3 | `fig3_dataset_breakdown.pdf` | none: a diagram drawn by hand |
+| Figure 4 | `fig4_gain_simulated_200_splits.pdf` | `paper_style_figs.py` |
+| Figure 5 | `fig5_gain_simulated.pdf`, `fig5_gain_pcam.pdf`, `fig5_gain_yelp.pdf` | `fig5_common_axis.py`, from the tables of `paper_style_figs.py` and `regen_real_data_gain_figures.py` (which draw each panel on its own axis, `fig5_gain_*_own_axis.pdf`) |
+| Figure 6 | `fig6_redundancy_vs_gain.pdf` | `fig6_redundancy_vs_gain.py` (name given by `--out`) |
+| Figure 7 | `fig7a_ranking_retrieval_yelp.pdf`, `fig7b_test_scores_yelp.pdf` | `regen_real_data_gain_figures.py --only fig5_yelp_aligned` |
+| Figure D.1 | `figD1_fold_error_correlation_vs_gain.pdf` | `figD1_rho_delta.py` |
+| Figure G.1 | `figG1_gain_hyperparameter_search.pdf` | `paper_style_figs.py` |
+| Figure H.1 | `figH1_gain_frozen_vs_resampled_splits.pdf` | `paper_style_figs.py` |
+| Figure I.1 | `figI1_gain_mccv_vs_repeated_kfold.pdf` | `regen_real_data_gain_figures.py --only figF1` |
+| Figure J.1 | `figJ1_gain_stratified_vs_unstratified.pdf` | `regen_real_data_gain_figures.py --only figK1` |
+| Figure K.1 | `figK1_gain_by_metric.pdf` | `regen_real_data_gain_figures.py --only figL1` |
+| Figure L.1 | `figL1_gain_small_budgets_ntr30.pdf`, `figL1_gain_small_budgets_ntr100.pdf` | `paper_style_figs.py` |
+| Figure O.1 | `figO1a_ranking_equivalent_gain.pdf`, `figO1b_ranking_retrieval_curves.pdf` | `code/ranking.py` |
 
 Figure 7 (retrieval of the quasi-oracle ranking on Yelp) is written by `nlp.py` through
 `regen_real_data_gain_figures.py --only fig5_yelp_aligned`: 95% Wilson intervals over the 50 seeds

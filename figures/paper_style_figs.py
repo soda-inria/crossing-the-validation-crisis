@@ -2,13 +2,14 @@
 """Simulated sample-gain figures of the paper (mean squared error) and the gain tables behind their intervals.
 
 Figures written to --out-dir:
-  aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_full.pdf        Figure 4 (n_tr = 1,000, K up to 200)
-  aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_K20.pdf         Figure 5 (left; the paper's panel is redrawn
-                                                                        with the axis of the other two panels by
-                                                                        fig5_common_axis.py)
-  aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_K20_hpo.pdf     Figure G.1 (fixed parameters, grid and random search)
-  aggregated_test_gain_k_100_sim_linear_mse_fixedsplit_overlay_K20.pdf  Figure H.1 (frozen and resampled splits)
-  small_label_gain_vs_K_N30_mse.pdf, small_label_gain_vs_K_N100_mse.pdf Figure L.1 (small budgets)
+  fig4_gain_simulated_200_splits.pdf                     Figure 4 (n_tr = 1,000, K up to 200)
+  fig5_gain_simulated_own_axis.pdf                       Figure 5 (left) on its own axis; the paper's panel,
+                                                         fig5_gain_simulated.pdf, is redrawn with the axis of the
+                                                         other two panels by fig5_common_axis.py
+  figG1_gain_hyperparameter_search.pdf                   Figure G.1 (fixed parameters, grid and random search)
+  figH1_gain_frozen_vs_resampled_splits.pdf              Figure H.1 (frozen and resampled splits)
+  figL1_gain_small_budgets_ntr30.pdf, figL1_gain_small_budgets_ntr100.pdf   Figure L.1 (small budgets)
+(the file names of the paper, listed in code/paper_names.py)
 It also writes the bootstrap results of each group of runs (sample_gain_bootstrap_<group>.parquet), the gain tables
 read by ci_appendix.py (tables/fig4, figI1, figJ1, figM1.parquet, for Tables E.1, E.3, E.4 and E.8; the names follow
 the LaTeX labels of those tables) and a K = 1 / 20 / 200 summary (summary_K1_K20_K200.csv).
@@ -51,6 +52,7 @@ from matplotlib.ticker import MaxNLocator
 import compute
 import datapaths
 import mse_gain_figures as T          # COLS, TEST / BENCH / OUTER, display_name(); gains() adapted below
+import paper_names as N
 import plot as P
 import simulated as SIM
 
@@ -293,9 +295,9 @@ def main():
                                             ("solver_disp", "procedure_disp", "split_mode", "solver_name", "dataset_type")],
                                    errors="ignore").to_parquet(f"{tdir}/{tag}.parquet", index=False)
     save(main_, "fig4")
-    fig = draw(main_, base, K200, f"{a.out_dir}/aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_full.pdf", f(1000),
+    fig = draw(main_, base, K200, f"{a.out_dir}/{N.FIG4}", f(1000),
                direct_label_positions=keep_rf["fig4"]); figs.append(fig)
-    fig = draw(main_[main_["K"] <= 20], base, K20, f"{a.out_dir}/aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_K20.pdf", f(1000)); figs.append(fig)
+    fig = draw(main_[main_["K"] <= 20], base, K20, f"{a.out_dir}/{N.FIG5_SIM_OWN_AXIS}", f(1000)); figs.append(fig)
     # Figure G.1: colour = learner as in every other figure, line style = tuning procedure.
     proc = {f"{n}{p}": (n, lab) for n in a.hpo_learners
             for p, lab in (("", "Fixed"), ("_GridSearch", "Grid search"), ("_RandomSearch", "Random search"))}
@@ -306,7 +308,7 @@ def main():
     # no padding), with shorter line samples (1.4 instead of 2 font sizes), so that "Random search" ends before the
     # dotted MLP curve. The ExtraTrees label is pinned in the empty band below the ExtraTrees curves: the automatic
     # placement avoids the mean of a learner's three curves and would put it on the solid MLP curve.
-    fig = draw(h, a.hpo_learners, K20, f"{a.out_dir}/aggregated_test_gain_k_1000_sim_linear_fixedFalse_mse_K20_hpo.pdf", f(1000),
+    fig = draw(h, a.hpo_learners, K20, f"{a.out_dir}/{N.FIGG1}", f(1000),
                style_col="procedure_disp", style_order=["Fixed", "Grid search", "Random search"],
                dashes={"Fixed": (), "Grid search": (4, 2), "Random search": (1, 1)}, style_legend=True,
                style_legend_loc="upper left", style_legend_bbox=(0.03, 0.7885),
@@ -320,7 +322,7 @@ def main():
         style_order=["Resampled split", "Fixed split"], dashes={"Resampled split": (), "Fixed split": (1, 1)},
         palette={n: COLOR[n] for n in base}, xticks=K20, hairlines=30, ncols=2,
         axes_size=(2.502, 2.409), axis_label_fontsize=12,    # each panel the size of a single figure's axes
-        output_path=f"{a.out_dir}/aggregated_test_gain_k_100_sim_linear_mse_fixedsplit_overlay_K20.pdf"); figs.append(fig)
+        output_path=f"{a.out_dir}/{N.FIGH1}"); figs.append(fig)
     r5 = disp(swap(res["small"], res["small_mlp32"]))                                # Figure L.1; MLP (32) labelled MLP
     r5 = r5[~r5["fixed_split"] & (r5["K"] <= 20)]
     small_names = base
@@ -335,7 +337,7 @@ def main():
         ax = fig.axes[0]
         ax.set_ylim(0, top)
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        P.save_figure(fig, f"{a.out_dir}/small_label_gain_vs_K_N{n}_mse.pdf", format="pdf", bbox_inches="tight")
+        P.save_figure(fig, f"{a.out_dir}/{N.FIGL1[n]}", format="pdf", bbox_inches="tight")
         print("panel", n, "ylim", ax.get_ylim(), "yticks", list(ax.get_yticks()))
     # K = 1 / 20 / 200 summary per learner
     rows = []

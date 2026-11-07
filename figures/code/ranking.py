@@ -24,6 +24,7 @@ import seaborn as sns
 
 import compute
 import datapaths
+import paper_names
 import plot as P
 
 # %% ──────────────────────────────────────────────────────────────────────────
@@ -670,12 +671,14 @@ def analyze_family(data, family, split_counts, alpha, n_bootstraps,
             print(f"   K={k}: {r['estimate']:.2f} [{r['ci_low']:.2f}, {r['ci_high']:.2f}]")
 
     # ── Plots ────────────────────────────────────────────────────────────────
+    # Figure O.1 (ExtraTrees, full ranking) under the paper's file names, the other families and modes under their tag
+    paper = {"extratrees_full": (paper_names.FIGO1B, paper_names.FIGO1A)}.get(tag)
     plot_retrieval_vs_studysize(
         curve_df, alpha, split_counts, family, mode=ranking_mode,
-        output_path=os.path.join(plots_dir, f"ranking_retrieval_curves_{tag}.pdf"))
+        output_path=os.path.join(plots_dir, paper[0] if paper else f"ranking_retrieval_curves_{tag}.pdf"))
     plot_ranking_gain_violin(
         gain_df, split_counts, family, mode=ranking_mode, summary=summary,
-        output_path=os.path.join(plots_dir, f"ranking_equivalent_gain_violin_{tag}.pdf"))
+        output_path=os.path.join(plots_dir, paper[1] if paper else f"ranking_equivalent_gain_violin_{tag}.pdf"))
     plot_ranking_gain_bars(
         summary, split_counts, family, mode=ranking_mode,
         output_path=os.path.join(plots_dir, f"ranking_equivalent_gain_bars_{tag}.pdf"))

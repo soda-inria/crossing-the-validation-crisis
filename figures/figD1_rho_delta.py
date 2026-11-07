@@ -18,7 +18,7 @@ Configurations, each on the metric of its gain figure:
     Figure I.1);
   Yelp, accuracy: BERT and XLM-RoBERTa at n_tr = 1,000 and 3,000 (re-run on the PCam protocol, 50 seeds), Qwen3-0.6B
     at n_tr = 1,000 (50 seeds).
-Writes figD1_rho_delta.csv and rho_delta_vs_gain.pdf to --out-dir. Reads the run outputs under the data root and the
+Writes figD1_rho_delta.csv and figD1_fold_error_correlation_vs_gain.pdf to --out-dir. Reads the run outputs under the data root and the
 gain tables written by paper_style_figs.py (--sim-gain-dir) and regen_real_data_gain_figures.py (--real-dir).
 """
 import argparse
@@ -38,6 +38,7 @@ import pandas as pd
 import compute
 import datapaths
 import mse_gain_figures as T
+import paper_names
 import plot as P
 import paper_style_figs as H
 
@@ -211,7 +212,7 @@ def main():
     for p, g in df.groupby("pipeline"):
         print(f"  {p}: n={len(g)}, rho {g.rho_delta.min():.3f}-{g.rho_delta.max():.3f}, Spearman {spearmanr(g.rho_delta, g.G20)[0]:.2f}, "
               f"G20/ICC {np.min(g.G20 / g.icc_gain):.2f}-{np.max(g.G20 / g.icc_gain):.2f}")
-    draw(df, f"{a.out_dir}/rho_delta_vs_gain.pdf")
+    draw(df, f"{a.out_dir}/{paper_names.FIGD1}")
 
 
 if __name__ == "__main__":
