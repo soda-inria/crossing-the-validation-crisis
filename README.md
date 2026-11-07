@@ -50,7 +50,6 @@ that take one, else the `DATA_ROOT` environment variable, else `data/` at the ro
     results_output_pcam/  PCam K-split runs (pcam/configs/mccv_cnns.txt, mccv_vit.txt, repeated_kfold_cnns.txt)
     stratandnewmetrics/   PCam stratified and unstratified runs with Brier score and NLL
                           (pcam/configs/stratification*_newmetrics_full*.txt)
-    nocv_jan/             PCam single-split runs (pcam/single_split_2026-01/), Table M.1
     ntr24/                PCam runs at n_tr = 24 (pcam/configs/redundancy_smalldata.txt), Appendix L
   nlp/
     yelp_qwen3_0.6b/            Qwen3-0.6B runs (yelp/configs/qwen_0.6b_1000.txt, qwen_0.6b_1000_nocv.txt)
@@ -101,7 +100,7 @@ analysis scripts run from `simulated/`.
 | Table J.1, Figure J.1, Table E.6 | `pcam/configs/stratification*_newmetrics_full*.txt` | `coherence_checks/strat_table.py` (Table J.1); `regen_real_data_gain_figures.py --only figK1` |
 | Figure K.1, Table E.7 | the same PCam runs; for the text: `linear_1000_half1_K20_N1000.yml` (Ridge, R^2 and MSE), `paper_main_gain_mse_k200*.yml` (MAE), `pilot_persample_k20.yml` (R^2 recentred) | `regen_real_data_gain_figures.py --only figL1`; `appL_r2.py`, `text_numbers_v5.py`, `simulated/analysis/persample_r2_centering.py` |
 | Figure L.1, Table E.8 | `linear_1000_half{1,2}_K20_smalldata{,2}.yml`, `small_budget_mlp64_rff50.yml`; PCam at n_tr = 24: `pcam/configs/redundancy_smalldata.txt` | `paper_style_figs.py`; text `text_numbers_v5.py`, `redundancy_numbers.py`, `coherence_checks/fold_geometry.py`, `coherence_checks/pcam24_*.py` |
-| Table M.1 | PCam: `pcam/single_split_2026-01/configs_adapted_100seeds_5study.txt` (the t-test and single-split columns) and `pcam/configs/mccv_cnns.txt` (the K = 20 column); Yelp: the aligned runs | PCam rows: `coherence_checks/g1_pcam_check.py`; Yelp rows: `code/nlp.py` via `regen_real_data_gain_figures.py --only fig5_yelp_aligned`, `coherence_checks/yelp_paper_snippets.py` |
+| Table M.1 | PCam: `pcam/configs/mccv_cnns.txt` (every column; the single split is the first split of each run); Yelp: the aligned runs | PCam rows: `coherence_checks/g1_pcam_check.py`; Yelp rows: `code/nlp.py` via `regen_real_data_gain_figures.py --only fig5_yelp_aligned`, `coherence_checks/yelp_paper_snippets.py` |
 | Table N.1 | `pcam/configs/mccv_cnns.txt` | `code/replicability.py` |
 | Figure O.1 | `ranking_100seeds*.yml`, `ranking_100-300seeds*.yml`, `ranking_300-500seeds*.yml` | `code/ranking.py` |
 

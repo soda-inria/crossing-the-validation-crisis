@@ -4,8 +4,7 @@ An accuracy measured on n images is a multiple of 1/n, so the smallest n that ma
 an integer count is the size of the set behind it: the test fold (`test_accuracy`), the validation subset
 (`val_accuracy`) and the outer chunks (`hidden_test_accuracies`). Set against the size label (`study_size`), it shows
 which convention a run followed:
-  * runs before 2026-08-01: the label is the study set; the test fold is a fifth of it (a sixth
-    before 2026-03-29) and n_tr, the training and validation subsets together, is the label minus the test fold;
+  * runs before 2026-08-01: the label is the study set; the test fold is a fifth of it and n_tr, the training and validation subsets together, is the label minus the test fold;
   * later runs: the label is n_tr, the study set (column `study_pool_size`) has 1.25 x label observations and the
     test fold label / 4.
 

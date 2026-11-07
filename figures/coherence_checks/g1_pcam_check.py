@@ -1,67 +1,55 @@
 """Table M.1 PCam rows, every column: D-bar, s_D, t, p, single-split retrieval and K = 20 CV retrieval.
 
-D-bar and s_D are the mean and standard deviation of the same per-seed differences. The paired t-test on the
-benchmarking accuracy (D-bar, s_D, t, p) and the single-split retrieval come from the January 2026 single-split runs
-(100 seeds; a sixth of each study set for testing, a sixth for validation), which also give the direction of each pair
-(higher mean benchmarking accuracy first). The K = 20 CV retrieval comes from the March 2026 20-split MCCV
-(shuffle_split) runs (50 seeds; test fold a fifth): the test accuracy averaged over the first 20 splits. A retrieval
-share counts the seeds in which the displayed 'highest mean' network has the strictly higher test accuracy, so ties
-count as failures. The study sets n = 30, 100, 300, 500, 800 printed here are the table's n_tr = 25, 83, 250, 416, 666.
+All the columns come from the 20-split MCCV (shuffle_split) runs of the three CNNs (pcam/configs/mccv_cnns.txt:
+50 seeds, test fold a fifth), computed as the Yelp rows (code/nlp.py): the per-seed score is the benchmarking accuracy
+averaged over the 20 splits; the paired t-test across the 50 seeds compares these scores (D-bar and s_D are the mean
+and standard deviation of the per-seed differences) and orders each pair (higher mean first). The single-split
+retrieval is the share of seeds in which the first split ranks that network first on test accuracy, the K = 20 CV
+retrieval the same share with the test accuracy averaged over the 20 splits; ties count as failures. The study sets
+of 30, 100, 300, 500 and 800 images give the table's n_tr = 24, 80, 240, 400, 640.
 
-Inputs, under the data root (--data-root, else $DATA_ROOT, else data/ at the repository root; see code/datapaths.py):
-pcam/nocv_jan (pcam/single_split_2026-01/configs_adapted_100seeds_5study.txt) and pcam/results_output_pcam (mccv_cnns.txt).
+Input, under the data root (--data-root, else $DATA_ROOT, else data/ at the repository root; see code/datapaths.py):
+pcam/results_output_pcam. Prints the table and its LaTeX rows.
 """
 import argparse, glob, itertools, os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "code"))  # code/datapaths.py
 import datapaths
-import numpy as np, pandas as pd
+import pandas as pd
 from scipy import stats
 
 K = 20
+NETS = {"densenet121": "DenseNet121", "mobilenet_v2": "MobileNetV2", "wide_resnet101_2": "WideResNet101\\_2"}
 ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 ap.add_argument("--data-root", default=None,
-                help="run outputs: pcam/nocv_jan and pcam/results_output_pcam under it "
-                     "(default: $DATA_ROOT, else data/ at the repository root)")
-ap.add_argument("--nocv-dir", default=None, help="January single-split runs (default: <data root>/pcam/nocv_jan)")
-ap.add_argument("--cv-dir", default=None,
-                help="March 20-split runs, of which only the MCCV (shuffle_split) files are read "
-                     "(default: <data root>/pcam/results_output_pcam)")
+                help="run outputs: pcam/results_output_pcam under it (default: $DATA_ROOT, else data/ at the repository root)")
 a = ap.parse_args()
-a.nocv_dir = a.nocv_dir or datapaths.data_path("pcam", "nocv_jan", root=a.data_root)
-a.cv_dir = a.cv_dir or datapaths.data_path("pcam", "results_output_pcam", root=a.data_root)
-
-D = a.nocv_dir
-fs = sorted(glob.glob(f"{D}/*.parquet"))
-d0 = pd.read_parquet(fs[0]); print(d0.columns.tolist()); print(d0.iloc[0].to_dict())
-d = pd.concat([pd.read_parquet(f) for f in fs], ignore_index=True)
-size = "study_size" if "study_size" in d.columns else [c for c in d.columns if "size" in c][0]
-bench = [c for c in d.columns if c.startswith("benchmark") and "acc" in c][0]
-test = [c for c in d.columns if "test" in c and "acc" in c and "hidden" not in c][0]
-print("columns used:", size, bench, test, "| rows", len(d), "| per model/size", d.groupby(["model", size]).seed.nunique().unique())
-
-cfs = sorted(glob.glob(f"{a.cv_dir}/*_CV_shuffle_split_*.parquet"))
-cv = pd.concat([pd.read_parquet(f, columns=["model", "study_size", "seed", "fold", "cv_method", "test_accuracy"]) for f in cfs],
-               ignore_index=True)
-cv = cv[cv.model.isin(d.model.unique())]
-assert (cv.cv_method == "shuffle_split").all() and not cv.duplicated(["model", "study_size", "seed", "fold"]).any()
-run = ["model", "study_size", "seed"]
-assert cv.groupby(run).size().min() >= K, f"a run has fewer than {K} splits"
-cvk = cv.sort_values("fold").groupby(run).head(K).groupby(["study_size", "seed", "model"]).test_accuracy.mean().unstack("model")
-print(f"K={K} MCCV runs: {cv.groupby(run).ngroups} runs of {sorted(cv.model.unique())} in {a.cv_dir} "
-      f"| splits per run {cv.groupby(run).size().unique()} "
-      f"| seeds per model/size {cv.groupby(['model', 'study_size']).seed.nunique().unique()}")
-
-for n, sub in d.groupby(size):
-    b = sub.pivot_table(index="seed", columns="model", values=bench)
-    t_ = sub.pivot_table(index="seed", columns="model", values=test)
-    c_ = cvk.xs(n, level="study_size")
-    for m1, m2 in itertools.combinations(sorted(b.columns), 2):
-        hi, lo = (m1, m2) if b[m1].mean() >= b[m2].mean() else (m2, m1)
-        q = b[[hi, lo]].dropna(); diff = q[hi] - q[lo]
-        tt, p = stats.ttest_rel(q[hi], q[lo])
-        r = t_[[hi, lo]].dropna()
-        c = c_[[hi, lo]].dropna()
-        print(f"n={n:4d} {hi:18s} > {lo:18s} n_seeds={len(q):3d} Dbar={diff.mean():.5f} sD={diff.std(ddof=1):.5f} t={tt:.3f} p={p:.4f} "
-              f"single-split retrieval {100 * (r[hi] > r[lo]).mean():.0f}% "
-              f"K={K} MCCV retrieval {100 * (c[hi] > c[lo]).mean():.0f}% ({len(c)} seeds)")
+D = datapaths.data_path("pcam", "results_output_pcam", root=a.data_root)
+files = [f for m in NETS for f in glob.glob(f"{D}/pcam_results_CV_shuffle_split_{m}_nsplits_{K}_seeds_*.parquet")]
+d = pd.concat([pd.read_parquet(f, columns=["model", "study_size", "seed", "fold", "test_accuracy", "benchmark_accuracy"])
+               for f in files], ignore_index=True)
+d = d[d.fold <= K]
+per = d.groupby(["study_size", "model", "seed"]).agg(bench=("benchmark_accuracy", "mean"), cv=("test_accuracy", "mean"))
+per = per.join(d[d.fold == 1].set_index(["study_size", "model", "seed"])["test_accuracy"].rename("single"))
+rows = []
+for n in sorted(d.study_size.unique()):
+    p = per.loc[n]
+    for x, y in itertools.combinations(NETS, 2):
+        X, Y = p.loc[x], p.loc[y]
+        s = X.index.intersection(Y.index)
+        X, Y = X.loc[s], Y.loc[s]
+        hi, lo, H, L = (x, y, X, Y) if X.bench.mean() >= Y.bench.mean() else (y, x, Y, X)
+        diff = H.bench - L.bench
+        t, pv = stats.ttest_rel(H.bench, L.bench)
+        rows.append(dict(n_tr=int(round(0.8 * n)), highest_mean=hi, lowest_mean=lo, mean_diff=diff.mean(),
+                         std_diff=diff.std(ddof=1), t_stat=t, p_value=pv, n_seeds=len(s),
+                         single_split_retrieval=(H.single > L.single).mean(), K20_cv_retrieval=(H.cv > L.cv).mean()))
+r = pd.DataFrame(rows)
+pd.set_option("display.width", 200)
+print(r.to_string(index=False, float_format=lambda v: f"{v:.5f}"))
+print("\nLaTeX rows of Table M.1:")
+for _, q in r.iterrows():
+    pv = q.p_value
+    ps = "\\textbf{$<$ 0.0001}" if pv < 1e-4 else (f"\\textbf{{{pv:.4f}}}" if pv < 0.05 else f"{pv:.4f}")
+    print(f"{NETS[q.highest_mean]} & {NETS[q.lowest_mean]} & {q.n_tr} & {q.mean_diff:.5f} & {q.std_diff:.5f} & {q.t_stat:.3f} & {ps} & "
+          f"{round(100 * q.single_split_retrieval)}\\% & {round(100 * q.K20_cv_retrieval)}\\% \\\\")

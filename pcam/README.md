@@ -17,7 +17,6 @@ call TIAToolbox.
 |---|---|
 | `pcam_deep_training_adapted.py` | the training loop: one call trains and scores every (seed, network, size) given on its command line |
 | `configs/*.txt` | the run sets of the paper: one line = the arguments of one job (table below) |
-| `single_split_2026-01/` | the script, run set and launcher of the January 2026 single-split runs (Table M.1), as they ran |
 | `launch.sh` | SLURM array launcher: task *i* runs line *i* of a configuration file |
 | `analysis/pcam_gain_analysis.py` | variance-equivalent sample gains with bootstrap intervals, and the redundancy after *k* splits (Table D.2) |
 | `analysis/pcam_redundancy_vs_gain.py` | redundancy against sample gain per network, size and metric (Table D.2, Figure 6) |
@@ -49,8 +48,8 @@ Appendix F.3 of the paper describes the protocol; in short:
   splits both test) are computed from the per-sample test losses, after each split and over all K.
 * Each run writes one Parquet file, one row per split, to `results_output_pcam/`.
 
-`--no-cross-validation` gives the single-split mode of the January 2026 runs (every split scores the outer set);
-the last row of the table below says how those runs were made.
+`--no-cross-validation` gives a single-split mode, in which every split scores the outer set; no run of the paper
+uses it.
 
 ## Install
 
@@ -150,14 +149,13 @@ V ViT-B/16. Every run uses 30 epochs and batches of 64.
 
 | Paper | Configuration file (lines) | Networks | n_tr (study set) | Seeds | Splits | Version of the script |
 |---|---|---|---|---|---|---|
-| Figures 2 (M, n_tr = 400), 5 (middle) and D.1; Tables E.2 and N.1; the K = 20 column of Table M.1; Table F.2 | `mccv_cnns.txt` (750), `mccv_vit.txt` (250) | D, M, W; V | 24, 80, 240, 400, 640 (30-800) | 0-49 | 20, ShuffleSplit | 2026-03-29 (the version that added ViT-B/16 the same day left the CNN code unchanged) |
+| Figures 2 (M, n_tr = 400), 5 (middle) and D.1; Tables E.2, M.1 (CNN rows) and N.1; Table F.2 | `mccv_cnns.txt` (750), `mccv_vit.txt` (250) | D, M, W; V | 24, 80, 240, 400, 640 (30-800) | 0-49 | 20, ShuffleSplit | 2026-03-29 (the version that added ViT-B/16 the same day left the CNN code unchanged) |
 | Figure I.1 and Table E.5 (n_tr = 240), against the ShuffleSplit runs above | `repeated_kfold_cnns.txt` (750) | D, M, W | 24-640 (30-800) | 0-49 | 20 = 4 x 5-fold | 2026-03-29 |
 | Table J.1, Figures J.1 and K.1, Tables E.6 and E.7 | unstratified: the lines without `--stratify` of `stratification_and_newmetrics_full.txt` and `stratification_and_newmetrics_full_newseeds.txt` (200 + 200); stratified: `stratificationONLY_and_newmetrics_full.txt` (400) | D, M, W, V | 400 (500) | 0-99 | 20, ShuffleSplit | 2026-07-25 (unstratified), 2026-07-26 (stratified) |
 | Appendix L (PCam at n_tr = 24); Table F.2 | `redundancy_smalldata.txt`: its 200 lines of n_tr = 24 (the 200 lines of n_tr = 40 feed no result) | D, M, W, V | 24 (30) | 0-49 | 20, ShuffleSplit | 2026-07-31 |
 | Table D.2; Figure 6 (PCam points); Table F.2 | `redundancy_round3_50seeds_3sizes.txt` (600), oracle on a fixed subset of 60,000 benchmarking images | D, M, W, V | 100, 300, 800 (125, 375, 1,000) | 100-149 | 20, ShuffleSplit | 2026-09-24 |
-| Table M.1 (t-test and single-split columns); Table F.2 (single-split rows) | `single_split_2026-01/configs_adapted_100seeds_5study.txt` (1,500) | D, M, W | study sets 30, 100, 300, 500, 800; test and validation subsets of a sixth each, so n_tr = 25, 83, 250, 416, 666 | 0-99 | 1 (`--no-cross-validation`) | 2026-01-15 (`single_split_2026-01/`) |
 
-**Reproducing them with the current script.** The first five rows run as they are: the current script rebuilds
+**Reproducing them with the current script.** Every row runs as it is: the current script rebuilds
 the same study sets and splits, and later commits only added output columns, the optional `--bench-max-samples`
 (off by default) and the n_tr label of `study_size` (GPU training is not bitwise deterministic, so scores match
 in distribution, not to the last digit). Until 2026-08-01, `--train-sizes` was called `--study-sizes` and gave the
@@ -167,19 +165,6 @@ In the outputs of those runs, `study_size` holds the study set and `study_pool_s
 (`analysis/pcam_set_sizes.py` tells the two conventions apart). Re-running the stratified lines of the two
 `stratification_and_newmetrics_full*.txt` files gives the stratified arm again (with the stratified outer chunks
 of 2026-07-26), so these files can also be run whole.
-
-The single-split runs of the last row held out a sixth of each study set for testing and a sixth for validation,
-before the protocol change of 2026-03-29; the current script cannot reproduce them and rejects their file
-(`--study-sizes` is unknown to it). `single_split_2026-01/` holds the script, the run set and the launcher as they ran
-(only the account and job name of the launcher were replaced by placeholders); the version of the unpinned
-`pytorch-gpu` module they loaded is not recorded. The script reads `./pcam_data/` too:
-
-```bash
-cd single_split_2026-01
-ln -s ../pcam_data pcam_data
-python pcam_deep_training_adapted.py --no-cross-validation --seeds 0 1 --study-sizes 30 --model-choices densenet121 --epochs 30 --batch-size 64
-sbatch --array=1-1500 launch.sh             # the whole run set; set the account first, and mkdir -p slurm_output
-```
 
 Neither the run outputs nor the analysis outputs are part of the repository.
 
