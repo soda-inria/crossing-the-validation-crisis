@@ -1,37 +1,81 @@
+<div align="center">
+
 # Crossing the Validation Crisis
 
-Code of *Crossing the Validation Crisis: Cross-Validation Reduces Benchmarking Variance Surprisingly Well*
-(Célestin Eve, Gaël Varoquaux and Thomas Moreau, NeurIPS 2026, Evaluations and Datasets track).
+### Cross-Validation Reduces Benchmarking Variance Surprisingly Well
 
-The paper measures how much a K-split cross-validation estimate of a learning algorithm's performance gains over a
-single train/test split: the *variance-equivalent test sample gain*, the factor by which a single test set would need
-to grow to match the variance of K-split cross-validation. It also introduces the *redundancy*, a statistic computed
-from the first few splits of one cross-validation run that anticipates this gain. This repository holds the three
-experiments of the paper and the scripts that draw every figure and table from their outputs.
+**Célestin Eve · Gaël Varoquaux · Thomas Moreau**
 
-| Folder | Contents | README |
-|---|---|---|
-| `simulated/` | the [benchopt](https://benchopt.github.io/) benchmark of the simulated runs (objective, datasets, learners), the configuration of every simulated run, its SLURM launchers and the analyses of the redundancy runs | [simulated/README.md](simulated/README.md) |
-| `pcam/` | the PatchCamelyon (PCam) training loop, its run configurations and its analyses | [pcam/README.md](pcam/README.md) |
-| `yelp/` | the Yelp Review Full fine-tuning loops and their run configurations | [yelp/README.md](yelp/README.md) |
-| `figures/` | the scripts that draw the figures and compute the tables and numbers of the paper, from the outputs of the three experiments | [figures/README.md](figures/README.md) |
+*NeurIPS 2026, Evaluations and Datasets track*
 
-The run outputs are not part of the repository: the experiments above produce them.
+[![arXiv](https://img.shields.io/badge/arXiv-2606.12552-b31b1b.svg)](https://arxiv.org/abs/2606.12552)
+[![NeurIPS 2026](https://img.shields.io/badge/NeurIPS-2026-4b44ce.svg)](https://neurips.cc/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-2ea44f.svg)](LICENSE)
+[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab.svg)](#quick-start)
+
+</div>
+
+## In a nutshell
+
+When test data are scarce, a benchmark that relies on a single train/test split depends heavily on which examples
+happened to be tested. Cross-validation repeats the split and averages. This repository measures what that buys.
+
+- **A unit that speaks for itself.** The *variance-equivalent test sample gain* is how many times larger the test set of
+  a single split would need to be to match the variance of $K$-split cross-validation.
+- **Gains are large.** Up to about 15 after 200 splits in our simulations, and up to about 11 after 20 splits on real
+  data (histopathology images and review classification).
+- **They keep growing.** The gain is still rising well beyond the usual 5 or 10 splits.
+- **The first splits tell you when to stop.** The *redundancy*, computed from the first few splits of one
+  cross-validation run, anticipates whether more splits will pay off.
+
+The practical message is simple: **split repeatedly**.
+
+<p align="center">
+  <img src="docs/sample_gain.png" width="460" alt="Estimation-error variance of a single split as its test set grows, against the variance of K-split cross-validation">
+</p>
+<p align="center"><sub><b>Figure 2 of the paper.</b> The variance of a single split falls as its test set grows (grey curve).
+Where it crosses the variance of K-split cross-validation (dashed lines) gives the sample gain G<sub>K</sub>:
+here (MobileNetV2 on PatchCamelyon), 20 splits are worth a single split with a test set about 7.6 times larger.</sub></p>
+
+## What is in this repository
+
+| Folder | What it holds |
+|---|---|
+| [`simulated/`](simulated/) | the [benchopt](https://benchopt.github.io/) benchmark of the simulated experiments: data processes, learners, the configuration of every run, cluster launchers, and the analyses of the redundancy |
+| [`pcam/`](pcam/) | the PatchCamelyon (histopathology) training loop, its run configurations and its analyses |
+| [`yelp/`](yelp/) | the Yelp Review Full fine-tuning loops (BERT, XLM-RoBERTa, Qwen3-0.6B) and their run configurations |
+| [`figures/`](figures/) | the scripts that draw every figure and compute every table of the paper from the outputs of the three experiments |
+
+Each folder has its own README with its environment and instructions. The run outputs are not distributed: the
+experiments produce them.
+
+## Quick start
+
+A one-seed simulated run, on a CPU, in a few minutes:
+
+```bash
+git clone https://github.com/ceelestin/crossing-the-validation-crisis
+cd crossing-the-validation-crisis/simulated
+pip install -r requirements.txt        # Python 3.11; pins benchopt 1.9.0
+benchopt run . --config configs/preflight_derivation.yml --no-plot --no-cache --no-timeout -j 4
+```
 
 ## Reproducing the paper
 
-1. **Run the experiments.** Each folder has its own environment and its own instructions:
-   - simulated: Python 3.11 and `simulated/requirements.txt` (CPU only);
-   - PCam: Python 3.12, `pcam/requirements.txt` and one GPU per job;
-   - Yelp: Python 3.12, `yelp/requirements.txt` (or `yelp/requirements-qwen3.txt` for Qwen3-0.6B) and one GPU per job.
+1. **Run the experiments**, following the README of each folder:
+   - [`simulated/`](simulated/README.md): Python 3.11, CPU only;
+   - [`pcam/`](pcam/README.md) and [`yelp/`](yelp/README.md): Python 3.12, one GPU per job.
 
-   The tables of the three READMEs list the runs behind each figure and table; the paper's runs were made as SLURM
-   job arrays on the Jean-Zay cluster (IDRIS), with the launchers of each folder.
+   Each README lists the runs behind every figure and table. The paper's runs were made as SLURM job arrays on the
+   Jean-Zay cluster (IDRIS), with the launchers of each folder.
 2. **Gather the outputs under one data root** (layout below).
-3. **Draw the figures and tables** with the scripts of `figures/` (Python 3.12 and `figures/requirements.txt`), in
-   the order given by [figures/README.md](figures/README.md).
+3. **Draw the figures and tables** with [`figures/`](figures/README.md) (Python 3.12), in the order its README gives.
+   Each figure is written under the file name that the paper uses.
 
-## Data layout
+<details>
+<summary><b>Where the scripts look for the run outputs</b></summary>
+
+<br>
 
 The figure and table scripts read the run outputs under one **data root**: the `--data-root` argument of the scripts
 that take one, else the `DATA_ROOT` environment variable, else `data/` at the root of this repository
@@ -60,24 +104,28 @@ that take one, else the `DATA_ROOT` environment variable, else `data/` at the ro
                                   figures/coherence_checks/rho_all.py)
 ```
 
-The paper no longer reports the first BERT and XLM-RoBERTa runs on Yelp, which used an earlier protocol, and their
-run sets are not part of this repository. `regen_real_data_gain_figures.py` computes the Qwen3-0.6B rows of Figure 5 in
-a pass that also reads them, and the bootstrap draws of one pass share a random stream. Without them, the Qwen3-0.6B
-estimate on all seeds is unchanged and only its bootstrap draws differ, at the Monte Carlo level (95% interval at K =
-20: [4.1, 9.8] instead of the published [4.3, 9.8]).
-
 Each sub-folder can be a link to wherever the outputs are. Three more locations, also set by environment variables:
 `FIGS_DIR` (default `figs/` at the root) holds what the figure scripts write and the table scripts read back;
 `PCAM_DIR` and `YELP_DIR` (default `pcam/` and `yelp/` of this repository) hold the outputs of the PCam analysis
 scripts (`pcam/analysis/out_*/`) and the run outputs written next to the training scripts. The simulated analysis
 scripts write to `simulated/analysis/out_<name>/`.
 
-## Figures and tables of the paper
+The paper no longer reports the first BERT and XLM-RoBERTa runs on Yelp, which used an earlier protocol, and their
+run sets are not part of this repository. `regen_real_data_gain_figures.py` computes the Qwen3-0.6B rows of Figure 5 in
+a pass that also reads them, and the bootstrap draws of one pass share a random stream. Without them, the Qwen3-0.6B
+estimate on all seeds is unchanged and only its bootstrap draws differ, at the Monte Carlo level (95% interval at K =
+20: [4.1, 9.8] instead of the published [4.3, 9.8]).
+
+</details>
+
+<details>
+<summary><b>Every figure and table of the paper, with its runs and its script</b></summary>
+
+<br>
 
 Scripts are in `figures/` unless the path says otherwise; [figures/README.md](figures/README.md) gives the order in
-which to run them, and the file name under which each figure is written: the name that the LaTeX source of the paper
-includes. Configurations are in `simulated/configs/`, `pcam/configs/` and `yelp/configs/`; the simulated
-analysis scripts run from `simulated/`.
+which to run them and the file name under which each figure is written. Configurations are in `simulated/configs/`,
+`pcam/configs/` and `yelp/configs/`; the simulated analysis scripts run from `simulated/`.
 
 | Paper | Runs | Script |
 |---|---|---|
@@ -107,6 +155,8 @@ analysis scripts run from `simulated/`.
 Other numbers of the text come from `figures/coherence_checks/` (see its README), `redundancy_numbers.py` and
 `text_numbers_v5.py`.
 
+</details>
+
 ## Citation
 
 ```bibtex
@@ -120,7 +170,7 @@ Other numbers of the text come from `figures/coherence_checks/` (see its README)
 
 ## License
 
-BSD 3-Clause, see [LICENSE](LICENSE). The datasets and pretrained models keep their own terms: PatchCamelyon is
-released under CC0 1.0, Yelp Review Full under the Yelp Dataset Terms of Use (non-commercial use only), and the
-pretrained checkpoints under their licenses (see [pcam/README.md](pcam/README.md) and [yelp/README.md](yelp/README.md)).
-Neither the data nor the run outputs are redistributed here.
+The code is released under the BSD 3-Clause license (see [LICENSE](LICENSE)). The datasets and pretrained models keep
+their own terms: PatchCamelyon is released under CC0 1.0, Yelp Review Full under the Yelp Dataset Terms of Use
+(non-commercial use only), and the pretrained checkpoints under their licenses (see [pcam/README.md](pcam/README.md)
+and [yelp/README.md](yelp/README.md)). Neither the data nor the run outputs are redistributed here.

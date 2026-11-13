@@ -40,6 +40,7 @@ core-*
 *.csv
 *.pdf
 *.png
+!docs/*.png
 *.log
 *.ipynb
 plots/
