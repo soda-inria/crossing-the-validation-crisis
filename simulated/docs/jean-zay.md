@@ -31,7 +31,7 @@ The launchers `cd "$WORK/crossing-the-validation-crisis/simulated"` and activate
 repository in `$WORK`, or edit these two lines.
 
 ```bash
-git clone https://github.com/ceelestin/crossing-the-validation-crisis $WORK/crossing-the-validation-crisis
+git clone https://github.com/soda-inria/crossing-the-validation-crisis $WORK/crossing-the-validation-crisis
 cd $WORK/crossing-the-validation-crisis/simulated
 pip install -r requirements.txt              # pins benchopt==1.9.0, see the file for why
 mkdir -p logs                                # SLURM writes logs/rank_<job>_<task>.{out,err} and does not create logs/

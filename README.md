@@ -54,7 +54,7 @@ experiments produce them.
 A one-seed simulated run, on a CPU, in a few minutes:
 
 ```bash
-git clone https://github.com/ceelestin/crossing-the-validation-crisis
+git clone https://github.com/soda-inria/crossing-the-validation-crisis
 cd crossing-the-validation-crisis/simulated
 pip install -r requirements.txt        # Python 3.11; pins benchopt 1.9.0
 benchopt run . --config configs/preflight_derivation.yml --no-plot --no-cache --no-timeout -j 4
