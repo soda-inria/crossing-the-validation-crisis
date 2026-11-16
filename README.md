@@ -45,6 +45,7 @@ here (MobileNetV2 on PatchCamelyon), 20 splits are worth a single split with a t
 | [`pcam/`](pcam/) | the PatchCamelyon (histopathology) training loop, its run configurations and its analyses |
 | [`yelp/`](yelp/) | the Yelp Review Full fine-tuning loops (BERT, XLM-RoBERTa, Qwen3-0.6B) and their run configurations |
 | [`figures/`](figures/) | the scripts that draw every figure and compute every table of the paper from the outputs of the three experiments |
+| [`cv_redundancy/`](cv_redundancy/) | a small helper to compute the redundancy in your own cross-validation (scikit-learn or PyTorch) and stop splitting once more splits would add little |
 
 Each folder has its own README with its environment and instructions. The run outputs are not distributed: the
 experiments produce them.
@@ -59,6 +60,23 @@ cd crossing-the-validation-crisis/simulated
 pip install -r requirements.txt        # Python 3.11; pins benchopt 1.9.0
 benchopt run . --config configs/preflight_derivation.yml --no-plot --no-cache --no-timeout -j 4
 ```
+
+## Using the redundancy in your own cross-validation
+
+[`cv_redundancy/`](cv_redundancy/) computes the redundancy after each split of a Monte Carlo cross-validation and
+stops it once the splits left in the budget would add little sample gain, less than 10% by default (NumPy only;
+scikit-learn and torch optional). From the repository root, or with it on `PYTHONPATH`:
+
+```python
+from sklearn.model_selection import ShuffleSplit
+from cv_redundancy import cross_validate_until_redundant
+
+res = cross_validate_until_redundant(estimator, X, y, cv=ShuffleSplit(n_splits=200, test_size=0.2),
+                                     loss="squared_error")  # the per-sample loss of the metric of interest
+print(res["n_splits"], res["monitor"])
+```
+
+Its [README](cv_redundancy/README.md) gives a runnable quick start, the PyTorch loop, the stopping rule and the caveats.
 
 ## Reproducing the paper
 
