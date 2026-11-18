@@ -3,8 +3,8 @@
 A simulated 3-class problem (600 observations, 20 features). Each split of a ShuffleSplit (test fraction 0.2, budget
 40 splits) trains a small MLP on the training part, then scores the test part with the per-sample cross-entropy
 (reduction="none"), the per-sample loss of the log-loss; the monitor stops the run once the splits left in the budget
-would add less than 10% of gain. For accuracy, feed it the 0-1 errors (predicted class != label) instead. Runs in
-seconds on a CPU, from the repository root:
+would add less than 10% of gain on the reference curve. For accuracy, feed it the 0-1 errors (predicted class !=
+label) instead. Runs in seconds on a CPU, from the repository root:
 
     python cv_redundancy/examples/torch_example.py
 """

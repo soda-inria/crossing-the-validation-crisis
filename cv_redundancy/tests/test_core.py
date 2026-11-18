@@ -2,6 +2,7 @@
 import math
 import re
 import warnings
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -30,6 +31,13 @@ def _variable_run(seed=5, n=120, k=8):
     effect = rng.normal(size=n)
     tests = [rng.permutation(n)[:rng.integers(10, 40)] for _ in range(k)]
     return n, tests, [(effect[idx] + rng.normal(size=idx.size)) ** 2 for idx in tests]
+
+
+def _scaled_run(seed=6, scale=1e9):
+    """One split's losses on a far larger scale than the others' (a diverged fit)."""
+    n, tests, losses = _run(seed=seed, k=8)
+    losses[3] = losses[3] * scale
+    return n, tests, losses
 
 
 def _batch(n, tests, losses):
@@ -80,7 +88,8 @@ def test_invariant_to_order_within_a_split():
     assert _same(a.summary(), b.summary())
 
 
-@pytest.mark.parametrize("make_run", [lambda: _run(seed=3, k=8), _variable_run], ids=["equal_sizes", "variable_sizes"])
+@pytest.mark.parametrize("make_run", [lambda: _run(seed=3, k=8), _variable_run, _scaled_run],
+                         ids=["equal_sizes", "variable_sizes", "one_split_scaled_1e9"])
 def test_jackknife_matches_leave_one_split_out(make_run):
     n, tests, losses = make_run()
     monitor = RedundancyMonitor.from_splits(n, tests, losses)
@@ -91,6 +100,22 @@ def test_jackknife_matches_leave_one_split_out(make_run):
     se = math.sqrt((k - 1) / k * np.sum((np.array(loo) - np.mean(loo)) ** 2))
     assert monitor.redundancy_se == pytest.approx(se, rel=1e-10)
     assert math.isnan(RedundancyMonitor.from_splits(n, tests[:2], losses[:2]).redundancy_se)
+
+
+def test_jackknife_undefined_without_a_split():
+    # only the pairs (0, 1) and (0, 2) share 2 observations: without split 0 the reading is undefined, and so is the SE
+    tests = [np.arange(6), np.array([0, 1, 2, 6]), np.array([3, 4, 5, 7])]
+    rng = np.random.default_rng(0)
+    losses = [rng.normal(size=idx.size) ** 2 for idx in tests]
+    monitor = RedundancyMonitor.from_splits(10, tests, losses)
+    assert monitor.is_defined and monitor.n_pairs == 2
+    assert not RedundancyMonitor.from_splits(10, tests[1:], losses[1:]).is_defined
+    assert monitor._leave_one_out() is None and math.isnan(monitor.redundancy_se)
+    assert "jackknife" not in repr(monitor)
+    # in reverse order, the split that carries the reading is the second member of both pairs, (0, 2) and (1, 2)
+    reverse = RedundancyMonitor.from_splits(10, tests[::-1], losses[::-1])
+    assert reverse.is_defined and reverse.n_pairs == 2
+    assert reverse._leave_one_out() is None and math.isnan(reverse.redundancy_se)
 
 
 def test_bounds_and_strong_redundancy():
@@ -122,6 +147,9 @@ def test_projected_gain():
     assert projected_gain(0.0, math.inf) == math.inf
     assert projected_gain(-0.05, 20) == pytest.approx(20.0)  # negative readings count as 0
     assert math.isnan(projected_gain(math.nan, 20))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a subnormal redundancy: 1 / omega overflows without a warning
+        assert projected_gain(1e-320, math.inf) == math.inf and projected_gain(1e-320, 20) == pytest.approx(20.0)
     gains = projected_gain(np.array([0.0, 0.05, 0.2])[:, None], np.arange(1, 50)[None, :])
     assert gains.shape == (3, 49)
     assert np.all(np.diff(gains, axis=1) >= 0) and np.all(np.diff(gains, axis=0) <= 0)
@@ -131,12 +159,16 @@ def test_projected_gain():
 
 def _brute_force_stop(omega, max_splits, tol, min_splits):
     for k in range(min_splits, max_splits + 1):
-        if projected_gain(omega, max_splits) / projected_gain(omega, k) - 1 < tol:
+        if omega <= 0:  # G(K) = K: in exact arithmetic, with tol read as a decimal
+            stop = Fraction(max_splits, k) - 1 < Fraction(repr(tol))
+        else:
+            stop = projected_gain(omega, max_splits) / projected_gain(omega, k) - 1 < tol
+        if stop:
             return k
     return max_splits
 
 
-@pytest.mark.parametrize("max_splits", [5, 20, 200])
+@pytest.mark.parametrize("max_splits", [5, 20, 24, 200])
 @pytest.mark.parametrize("tol", [0.02, 0.1, 0.5])
 def test_stopping_split(max_splits, tol):
     omegas = [-0.1, 0.0, 0.01, 0.05, 0.1, 0.2]
@@ -146,16 +178,51 @@ def test_stopping_split(max_splits, tol):
     assert stops[0] == stops[1] == max(3, min(max_splits, math.floor(max_splits / (1 + tol)) + 1))
 
 
+def test_stopping_split_at_exact_ties():
+    # omega <= 0: G(K) = K and the remaining gain K_max / k - 1 can equal tol exactly; the strict < continues there
+    # (24 / 16 - 1 = 0.5 comes out exact on the curve too)
+    assert stopping_split(0.0, 24, tol=0.5) == stopping_split(-0.01, 24, tol=0.5) == 17
+    # 6 / 5 - 1 = 0.2, where the curve's ratio gives 0.19999999999999996 and would stop at 5; a negative reading too
+    assert stopping_split(0.0, 6, tol=0.2, min_splits=2) == stopping_split(-0.01, 6, tol=0.2, min_splits=2) == 6
+    n, tests, _ = _run(n=50, n_te=12, k=6)
+    monitor = RedundancyMonitor(n, max_splits=6, tol=0.2, min_splits=2)
+    for idx in tests[:5]:
+        monitor.add_split(idx, np.zeros(idx.size))  # constant losses: redundancy 0
+    assert monitor.redundancy == 0.0 and monitor.remaining_gain() == 0.2 and not monitor.should_stop()
+    monitor.add_split(tests[5], np.zeros(tests[5].size))
+    with pytest.warns(UserWarning, match="constant"):  # stops at the budget
+        assert monitor.should_stop()
+
+
+def _brute_force_stop_without_budget(omega, tol, min_splits=3):
+    """First k >= min_splits with G(inf) / G(k) - 1 < tol on the curve, scanning k past the closed form."""
+    ks = np.arange(min_splits, int((1 - omega) / (tol * omega)) + 100)
+    remaining = projected_gain(omega, math.inf) / projected_gain(omega, ks) - 1
+    return int(ks[np.argmax(remaining < tol)])
+
+
 def test_stopping_split_without_budget():
     assert stopping_split(0.0, None) == math.inf
     for omega in (0.03, 0.07, 0.15):  # away from the ties of (1 - omega) / (tol omega) integer
         k = stopping_split(omega, None, 0.1)
         assert k == math.floor((1 - omega) / (0.1 * omega)) + 1  # G(inf) / G(k) - 1 = (1 - omega) / (k omega)
         assert stopping_split(omega, 100_000, 0.1) <= k
+    # 2-decimal omega and tol, near-ties of (1 - omega) / (tol omega) integer included: the monitor's float curve
+    for omega in [i / 100 for i in range(1, 26)]:
+        for tol in [i / 100 for i in range(1, 51)]:
+            assert stopping_split(omega, None, tol) == _brute_force_stop_without_budget(omega, tol), (omega, tol)
+    # a reading so small that the stop lies beyond 2^53 splits: no stop, and no endless search
+    for omega in (1e-15, 1e-50, 1e-300, 1e-310, 5e-324):
+        assert stopping_split(omega, None) == math.inf
     for max_splits in (None, 20):
-        for kwargs in ({"tol": 0}, {"tol": -0.1}, {"min_splits": 1}, {"max_splits": 0}):
+        for kwargs in ({"tol": 0}, {"tol": -0.1}, {"tol": math.nan}, {"min_splits": 1}, {"max_splits": 0},
+                       {"max_splits": True}, {"max_splits": np.True_}, {"max_splits": 10 ** 400},
+                       {"max_splits": math.inf}, {"max_splits": math.nan}, {"min_splits": True}):
             with pytest.raises(ValueError):
                 stopping_split(0.1, **{"max_splits": max_splits, **kwargs})
+        for omega in (math.inf, -math.inf, math.nan):
+            with pytest.raises(ValueError, match="finite"):
+                stopping_split(omega, max_splits)
 
 
 def _redundant_run(n=50, n_te=12, k=60, seed=0):
@@ -194,8 +261,22 @@ def test_should_stop_waits_for_min_splits_and_a_defined_reading():
         assert not monitor.is_defined and math.isnan(monitor.remaining_gain())
         if monitor.n_splits < 3:
             assert not monitor.should_stop()
-    with pytest.warns(UserWarning, match="undefined"):
+    with pytest.warns(UserWarning, match="undefined") as record:
         assert monitor.should_stop()
+    assert "K-fold repeat never overlap" in str(record[0].message)
+    # a budget of one split: no pair at all
+    monitor = RedundancyMonitor(30, max_splits=1).add_split(np.arange(10), np.ones(10))
+    with pytest.warns(UserWarning, match="single split, which gives no pair") as record:
+        assert monitor.should_stop()
+    assert "use a budget of 2 splits or more" in str(record[0].message)
+    # a budget of two splits whose test sets are disjoint: a pair, but no shared observation
+    monitor = RedundancyMonitor(20, max_splits=2).add_split(np.arange(10), np.ones(10))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the disjoint test sets may warn
+        monitor.add_split(np.arange(10, 20), np.ones(10))
+    with pytest.warns(UserWarning, match="no two test sets shared") as record:
+        assert monitor.should_stop()
+    assert "single split" not in str(record[0].message)
 
 
 def test_should_stop_warns_on_constant_losses():
@@ -204,6 +285,9 @@ def test_should_stop_warns_on_constant_losses():
     assert monitor.is_defined and monitor.mean_pair_variance == 0 and monitor.redundancy == 0.0
     with pytest.warns(UserWarning, match="constant"):
         assert monitor.should_stop()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no 0 / 0 in the leave-one-out readings: they are 0 too
+        assert monitor.redundancy_se == 0.0
 
 
 def test_summary_and_repr():
@@ -219,6 +303,9 @@ def test_summary_and_repr():
     assert s["test_fraction"] == pytest.approx(0.2)
     text = repr(monitor)
     assert text.startswith("RedundancyMonitor(") and f"{monitor.redundancy:.3f}" in text and "splits=6 of 20" in text
+    gains = re.search(r"reference-curve gain \(kappa = 0\) (\d+\.\d\d) now, (\d+\.\d\d) at 20 splits", text)
+    assert gains and float(gains[1]) == pytest.approx(s["projected_gain"], abs=0.005)
+    assert float(gains[2]) == pytest.approx(s["projected_gain_at_max_splits"], abs=0.005)
     remaining = re.search(r"\(\+(\d+\.\d\d)% (<|>=) tol 10%\): (stop|continue)\)$", text)
     assert remaining and float(remaining[1]) == pytest.approx(100 * monitor.remaining_gain(), abs=0.005)
     assert (remaining[2] == "<") == (remaining[3] == "stop") == monitor.should_stop()
@@ -253,14 +340,26 @@ def test_inputs():
                              ([], [], ValueError),
                              ([0.0, 1.0], [0, 1], TypeError),       # float indices
                              (np.ones(5, dtype=bool), [0] * 5, ValueError),  # mask of the wrong length
-                             ([0, 1], ["a", "b"], TypeError)]:
+                             ([0, 1], ["a", "b"], TypeError),
+                             ([0, 1], ["1.5", "2"], TypeError),     # numbers as strings
+                             ([0, 1], np.array([1 + 1j, 2]), TypeError),  # complex
+                             ([0, 1], np.array([1.0, 2.0], dtype=object), TypeError)]:  # objects
         with pytest.raises(error):
             monitor.add_split(idx, loss)
     assert monitor.n_splits == 0
-    for kwargs in ({"n_samples": 1}, {"n_samples": 10, "max_splits": 0}, {"n_samples": 10, "tol": 0},
-                   {"n_samples": 10, "min_splits": 1}):
+    for kwargs in ({"n_samples": 1}, {"n_samples": math.inf}, {"n_samples": 10, "max_splits": 0},
+                   {"n_samples": 10, "tol": 0}, {"n_samples": 10, "min_splits": 1},
+                   {"n_samples": 10, "max_splits": True}, {"n_samples": 10, "max_splits": math.inf},
+                   {"n_samples": 10, "max_splits": 2.5}, {"n_samples": 10, "min_splits": math.nan},
+                   {"n_samples": 10, "max_splits": np.True_}, {"n_samples": 10, "max_splits": 10 ** 400},
+                   {"n_samples": 10, "tol": math.nan}):
         with pytest.raises(ValueError):
             RedundancyMonitor(**kwargs)
+    with pytest.raises(ValueError, match="max_splits=None for no budget"):
+        RedundancyMonitor(10, max_splits=math.inf)
+    assert RedundancyMonitor(10, max_splits=20.0, min_splits=np.int64(4)).max_splits == 20
+    integer = RedundancyMonitor(10).add_split([0, 1, 2], [1, 0, 2])  # integer and boolean losses are numbers
+    assert integer.add_split([1, 2, 3], np.array([True, False, True])).n_splits == 2
     with pytest.raises(ValueError):
         RedundancyMonitor.from_splits(n, tests, losses[:2])
     with pytest.raises(TypeError):

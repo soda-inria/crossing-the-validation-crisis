@@ -5,6 +5,7 @@ mean of these losses over a test set is the metric on that set.
 
     loss name        metric                                  predictions needed
     squared_error    mean squared error                      predict
+    absolute_error   mean absolute error                     predict
     zero_one         error rate, 1 - accuracy                predict (class labels)
     log_loss         log-loss (negative log-likelihood)      predict_proba
     brier            Brier score                             predict_proba
@@ -13,21 +14,38 @@ A metric that does not average over observations, such as R^2 or the ROC AUC, ha
 redundancy (Appendix K of the paper).
 
 The probability losses take ``classes``, the class of each column of the probability matrix (``estimator.classes_``
-in scikit-learn); without it, labels are column positions. A 1-D probability vector is P(class 1) of a binary
-problem. A true class that is not a column (absent from the training part of a split) has probability 0.
+in scikit-learn); without it, labels must be the column positions 0..C-1 (a ValueError otherwise). A 1-D probability
+vector is P(class 1) of a binary problem. With ``classes``, a true class that is not a column (absent from the
+training part of a split) has probability 0.
 """
+import inspect
+
 import numpy as np
 
 
-def squared_error(y_true, y_pred):
-    """(y - prediction)^2; averaged over the outputs of a multi-output regression, as the MSE of scikit-learn."""
+def _residuals(y_true, y_pred):
+    """y - prediction, as floats of the shape of y_true."""
     y_true, y_pred = np.asarray(y_true, dtype=float), np.asarray(y_pred, dtype=float)
     if y_pred.shape != y_true.shape:
         if y_pred.size != y_true.size:
             raise ValueError(f"y_true of shape {y_true.shape} and predictions of shape {y_pred.shape}")
         y_pred = y_pred.reshape(y_true.shape)  # e.g. (n, 1) predictions for (n,) targets
-    err = (y_true - y_pred) ** 2
+    return y_true - y_pred
+
+
+def _mean_over_outputs(err):
+    """Per-sample errors, averaged over the outputs of a multi-output regression (as scikit-learn's metrics)."""
     return err.reshape(len(err), -1).mean(axis=1) if err.ndim > 1 else err
+
+
+def squared_error(y_true, y_pred):
+    """(y - prediction)^2; averaged over the outputs of a multi-output regression, as the MSE of scikit-learn."""
+    return _mean_over_outputs(_residuals(y_true, y_pred) ** 2)
+
+
+def absolute_error(y_true, y_pred):
+    """|y - prediction|; averaged over the outputs of a multi-output regression, as the MAE of scikit-learn."""
+    return _mean_over_outputs(np.abs(_residuals(y_true, y_pred)))
 
 
 def zero_one(y_true, y_pred):
@@ -52,13 +70,19 @@ def _proba_matrix(proba):
 def _true_class_columns(y_true, n_columns, classes):
     """Column of each observation's class in the probability matrix, and whether that class is a column."""
     y = np.asarray(y_true)
+    if y.ndim == 2 and y.shape[1] == 1:
+        y = y.reshape(-1)  # a column of labels, as scikit-learn accepts
+    if y.ndim != 1:
+        raise ValueError(f"labels must be 1-D (one class per observation), got shape {y.shape}")
     if classes is None:
-        if not np.issubdtype(y.dtype, np.integer):
-            if not (np.issubdtype(y.dtype, np.floating) and np.all(y == np.round(y))):
-                raise ValueError("without classes, labels must be integer column positions; pass classes=")
+        positions = y.dtype.kind in "biu" or (  # booleans are the positions 0 and 1
+            np.issubdtype(y.dtype, np.floating) and np.all(np.isfinite(y)) and np.all(y == np.round(y)))
+        if positions:
             y = y.astype(int)
-        present = (y >= 0) & (y < n_columns)
-        return np.where(present, y, 0), present
+        if not positions or np.any((y < 0) | (y >= n_columns)):
+            raise ValueError(f"without classes, labels must be the column positions 0..{n_columns - 1} of the "
+                             "probabilities; pass classes=, e.g. estimator.classes_")
+        return y, np.ones(y.shape, dtype=bool)
     classes = np.asarray(classes)
     if classes.shape != (n_columns,):
         raise ValueError(f"{classes.size} classes for {n_columns} probability columns")
@@ -71,10 +95,16 @@ def _true_class_columns(y_true, n_columns, classes):
 def log_loss(y_true, proba, classes=None, eps=None):
     """-log(p_true), the per-sample negative log-likelihood (cross-entropy) of predicted probabilities.
 
+    ``classes``: the class of each column of ``proba`` (``estimator.classes_``). Without it, the labels must be the
+    column positions 0..C-1, or a ValueError is raised; labels that lie in that range without being positions (a test
+    set with only labels 1 and 2 out of classes {1, 2, 3}, with 3 columns) cannot be detected: pass ``classes``.
+
     As in ``sklearn.metrics.log_loss``, p_true is clipped to [eps, 1 - eps], with eps the machine epsilon of the
     probabilities' dtype by default, so that the mean over a test set is scikit-learn's log-loss even when a model
     gives probability 0 to the true class (trees, forests, nearest neighbours). The PCam and Yelp scripts of the paper
-    use -log(p_true + 1e-12), which differs only when p_true < 1e-10.
+    use -log(p_true + 1e-12). For float64 probabilities the two differ by more than 0.01 only when p_true < 1e-10;
+    float32 probabilities are clipped at their machine epsilon, 1.19e-7, which caps the loss at 15.9 (pass
+    ``eps=1e-12`` to match the scripts).
     """
     if eps is None:
         dtype = np.asarray(proba).dtype
@@ -91,6 +121,7 @@ def brier(y_true, proba, classes=None):
     """sum_c (p_c - 1[y = c])^2, the multiclass Brier score of the PCam and Yelp scripts.
 
     For two classes it is twice ``sklearn.metrics.brier_score_loss``; the factor does not change the redundancy.
+    ``classes`` as in ``log_loss``: without it, the labels must be the column positions 0..C-1.
     """
     p = _proba_matrix(proba)
     col, present = _true_class_columns(y_true, p.shape[1], classes)
@@ -105,6 +136,7 @@ def brier(y_true, proba, classes=None):
 # loss name -> (per-sample loss, prediction method of a scikit-learn estimator)
 LOSSES = {
     "squared_error": (squared_error, "predict"),
+    "absolute_error": (absolute_error, "predict"),
     "zero_one": (zero_one, "predict"),
     "log_loss": (log_loss, "predict_proba"),
     "brier": (brier, "predict_proba"),
@@ -113,6 +145,7 @@ LOSSES = {
 # metric names (scikit-learn scorer names included) -> loss name
 METRIC_LOSSES = {
     "mse": "squared_error", "mean_squared_error": "squared_error", "neg_mean_squared_error": "squared_error",
+    "mae": "absolute_error", "mean_absolute_error": "absolute_error", "neg_mean_absolute_error": "absolute_error",
     "accuracy": "zero_one", "error_rate": "zero_one",
     "nll": "log_loss", "neg_log_loss": "log_loss", "cross_entropy": "log_loss",
     "brier_score": "brier", "neg_brier_score": "brier",
@@ -124,12 +157,25 @@ _NOT_A_MEAN = ("r2", "explained_variance", "root_mean_squared", "rmse", "roc_auc
                "precision", "recall", "jaccard", "balanced_accuracy", "matthews_corrcoef", "top_k_accuracy")
 
 
+def _takes_classes(func):
+    """Whether a per-sample loss takes ``classes``: log_loss, brier, or a callable with a ``classes`` keyword."""
+    if func is log_loss or func is brier:
+        return True
+    try:
+        parameter = inspect.signature(func).parameters.get("classes")
+    except (TypeError, ValueError):  # no signature, as for some builtins
+        return False
+    return parameter is not None and parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+
+
 def resolve_loss(loss):
     """(per-sample loss function, prediction method, whether it takes ``classes``) for ``loss``.
 
     ``loss``: a name of ``LOSSES`` or ``METRIC_LOSSES``; a callable ``loss(y_true, y_pred)`` on the output of
     ``predict``, returning one value per sample; or a pair (callable, "predict" or "predict_proba" or
-    "decision_function").
+    "decision_function"). The callable of a (callable, "predict_proba") pair gets the probability columns in the order
+    of ``estimator.classes_``, and ``classes=estimator.classes_`` too if it takes a ``classes`` keyword (as
+    ``log_loss`` and ``brier`` do).
     """
     if isinstance(loss, str):
         name = METRIC_LOSSES.get(loss, loss)
@@ -140,11 +186,11 @@ def resolve_loss(loss):
             raise ValueError(f"unknown loss {loss!r}; use one of {sorted(LOSSES) + sorted(METRIC_LOSSES)}, "
                              "or a callable")
         func, method = LOSSES[name]
-        return func, method, func in (log_loss, brier)
+        return func, method, _takes_classes(func)
     if callable(loss):
         return loss, "predict", False
     if isinstance(loss, tuple) and len(loss) == 2 and callable(loss[0]):
         if loss[1] not in ("predict", "predict_proba", "decision_function"):
             raise ValueError(f"unknown prediction method {loss[1]!r}")
-        return loss[0], loss[1], False
+        return loss[0], loss[1], loss[1] == "predict_proba" and _takes_classes(loss[0])
     raise TypeError(f"loss must be a name, a callable or a (callable, method) pair, got {loss!r}")

@@ -31,16 +31,17 @@ y = X @ rng.normal(size=10) + rng.normal(size=300)
 budget = 200
 cv = ShuffleSplit(n_splits=budget, test_size=0.2, random_state=0)
 
-print(f"Budget {budget} splits, tol 0.1 (stop once the remaining splits would add less than 10% of gain)\n")
-at_budget = f"at {budget}"
-print(f"{'learner':<14} {'splits':>6} {'MSE':>6} {'redundancy':>16} {'gain now':>9} {at_budget:>7} {'ceiling':>8}")
+print(f"Budget {budget} splits, tol 0.1 (stop once the remaining splits would add less than 10% of gain)")
+print("Gains on the reference curve (kappa = 0): at the splits run, at the budget, and its ceiling\n")
+at_budget = f"curve at {budget}"
+print(f"{'learner':<14} {'splits':>6} {'MSE':>6} {'redundancy':>18} {'curve gain':>10} {at_budget:>12} {'ceiling':>8}")
 for name, estimator in [("Ridge", Ridge(alpha=1.0)), ("DecisionTree", DecisionTreeRegressor(random_state=0)),
                         ("1-NN", KNeighborsRegressor(n_neighbors=1))]:
     res = cross_validate_until_redundant(estimator, X, y, cv=cv, loss="squared_error")
     m = res["monitor"]
     print(f"{name:<14} {res['n_splits']:>6} {res['test_loss'].mean():>6.2f} "
-          f"{m.redundancy:>8.3f} +/- {m.redundancy_se:.3f} {m.projected_gain():>9.1f} "
-          f"{m.projected_gain(budget):>7.1f} {m.ceiling:>8.1f}")
+          f"{m.redundancy:>8.3f} +/- {m.redundancy_se:.3f} {m.projected_gain():>10.1f} "
+          f"{m.projected_gain(budget):>12.1f} {m.ceiling:>8.1f}")
 
 # After the fact: five splits of scikit-learn's cross_validate, and would a budget of 200 splits pay?
 cv_results = cross_validate(DecisionTreeRegressor(random_state=0), X, y,

@@ -63,9 +63,10 @@ benchopt run . --config configs/preflight_derivation.yml --no-plot --no-cache --
 
 ## Using the redundancy in your own cross-validation
 
-[`cv_redundancy/`](cv_redundancy/) computes the redundancy after each split of a Monte Carlo cross-validation and
-stops it once the splits left in the budget would add little sample gain, less than 10% by default (NumPy only;
-scikit-learn and torch optional). From the repository root, or with it on `PYTHONPATH`:
+[`cv_redundancy/`](cv_redundancy/) computes the redundancy (Section 5.1, Appendix D.2) after each split of a Monte
+Carlo cross-validation. Its own stopping rule, not the paper's, ends the run once the splits left in the budget would
+add less than 10% of gain on the reference curve (`tol=0.1` by default). NumPy only; scikit-learn and torch are
+optional. Start Python from the repository root, or put the root on `PYTHONPATH`:
 
 ```python
 from sklearn.model_selection import ShuffleSplit

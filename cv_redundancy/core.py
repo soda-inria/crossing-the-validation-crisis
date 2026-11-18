@@ -3,8 +3,9 @@
 The statistic is that of Appendix D.2 of the paper. One CV run has splits a = 1..k; split a holds out the test set
 T_a (indices into the n observations the test sets are drawn from, the study set n_tr + n_te of the paper) and gives
 the out-of-fold loss e_{a,i} = loss(g_a(x_i), y_i) of each i in T_a, with the per-sample loss of the metric whose
-precision matters (squared error for the MSE, 0-1 error for accuracy, negative log-likelihood for the log-loss, Brier
-score for the Brier score). For each pair a < b, on the observations both splits hold out, I_ab = T_a & T_b:
+precision matters (squared error for the MSE, absolute error for the MAE, 0-1 error for accuracy, negative
+log-likelihood for the log-loss, Brier score for the Brier score). For each pair a < b, on the observations both splits
+hold out, I_ab = T_a & T_b:
 
     cov_ab = sample covariance of e_a and e_b over I_ab (ddof = 1, as np.cov)
     var_ab = (var(e_a over I_ab) + var(e_b over I_ab)) / 2 (ddof = 1)
@@ -22,16 +23,22 @@ The paper's numbers come from ``_oof_intersection_icc`` in simulated/objective.p
 pcam/pcam_deep_training_adapted.py and yelp/nlpfinetuning_aligned.py; tests/test_reference.py checks that
 ``RedundancyMonitor`` gives the same values. Each new split only computes its pairs with the splits before it.
 
-Stopping rule (projection-based): after k >= min_splits splits, once the redundancy is defined, project the gain with
-the reference curve, G(K) = K / (1 + (K - 1) * max(omega_hat, 0)), and stop when the splits left in the budget K_max
-would add less than ``tol`` of gain: G(K_max) / G(k) - 1 < tol. The coupling kappa is intrinsic to cross-validation
-and not estimable from the study set; it can take either sign but is usually >= 0, most at small training sizes. The
-gain left is then smaller than projected, so the rule continues longer than strictly needed rather than stopping too
-early. This holds for a given redundancy: a reading above the population value, through noise, makes the rule stop
-earlier, most visibly with large budgets. The default tol = 0.1: the test-side variance of the CV estimate is about
-that of a single split divided by G (single-split variance scaling as 1 / n_te), so the splits left would shrink that
-part of the standard error by less than 5% (1 - 1 / sqrt(1.1)), and the total standard error, which also carries the
-variation of the study set that no number of splits averages out, by even less.
+Stopping rule (projection-based). The paper validates the redundancy as a triage signal after 3 or 5 splits; this rule
+is the package's own way of acting on it. It uses the shape of the reference curve, not an estimate of the gain. After
+k >= min_splits splits, once the redundancy is defined, it projects the gain with
+
+    G(K) = K / (1 + (K - 1) * max(omega_hat, 0))
+
+and stops when the splits left in the budget K_max would add less than ``tol`` of gain: G(K_max) / G(k) - 1 < tol.
+The coupling kappa is intrinsic to cross-validation and not estimable from the study set. It is mostly positive in the
+paper's simulated settings, and largest at small training sizes, where the gains fall below the curve: the gain left is
+then smaller than projected, and the rule continues longer than strictly needed. The coupling can also be negative
+(Appendix D.2), with gains above the curve; the gain left at the stop can then be somewhat above tol. All this holds for
+a given redundancy: a reading above the population value, through noise, makes the rule stop earlier, most visibly with
+large budgets. The default tol = 0.1: the test-side variance of the CV estimate is about that of a single split divided
+by G (single-split variance scaling as 1 / n_te), so the splits left would shrink that part of the standard error by
+less than 5% (1 - 1 / sqrt(1.1)), and the total standard error, which also carries the variation of the study set that
+no number of splits averages out, by even less.
 """
 import math
 import os
@@ -47,7 +54,7 @@ DEFAULT_MIN_SPLITS = 3
 # p_ab = C(n - m_a, m_b) / C(n, m_b). These events are pairwise independent, so the number of disjoint pairs is close
 # to a Poisson count of mean sum p_ab. A count far in its upper tail points to K-fold-like test sets (disjoint within
 # a repeat). In simulated 200-split Monte Carlo runs (n = 10 to 1,000) this level never fired; it flags one repeat of
-# 5-fold after 3 to 5 splits from n = 50 on.
+# 5-fold after 2 to 5 splits from n = 42 on (after 2 from n = 271), and never on 41 observations or fewer.
 _LOG_DISJOINT_LEVEL = math.log(1e-6)
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -89,12 +96,23 @@ def _log_poisson_tail(count, mean):
     return -mean + count * math.log(mean) - math.lgamma(count + 1) - math.log1p(-mean / (count + 1))
 
 
+def _is_count(value, minimum):
+    """Whether ``value`` is an integer >= minimum (a float with an integer value counts; a bool, inf or NaN not)."""
+    if isinstance(value, (bool, np.bool_)):
+        return False
+    try:
+        return math.isfinite(value) and int(value) == value and value >= minimum
+    except (TypeError, ValueError, OverflowError):  # not a number, or an int beyond the float range
+        return False
+
+
 def _check_rule(max_splits, tol, min_splits):
-    if max_splits is not None and (int(max_splits) != max_splits or max_splits < 1):
-        raise ValueError(f"max_splits must be None or an integer >= 1, got {max_splits!r}")
+    if max_splits is not None and not _is_count(max_splits, 1):
+        raise ValueError(f"max_splits must be None or an integer >= 1, got {max_splits!r} "
+                         "(use max_splits=None for no budget)")
     if not tol > 0:
         raise ValueError(f"tol must be > 0, got {tol!r}")
-    if int(min_splits) != min_splits or min_splits < 2:
+    if not _is_count(min_splits, 2):
         raise ValueError(f"min_splits must be an integer >= 2, got {min_splits!r}")
 
 
@@ -111,7 +129,7 @@ def projected_gain(redundancy, n_splits):
     if np.any(k < 1):
         raise ValueError(f"n_splits must be >= 1, got {n_splits!r}")
     w = np.maximum(omega, 0.0)  # NaN stays NaN
-    with np.errstate(divide="ignore", invalid="ignore"):
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):  # 1 / w overflows for a subnormal w
         finite = k / (1.0 + (k - 1.0) * w)
         ceiling = np.where(w > 0, 1.0 / w, np.inf)
     gain = np.where(np.isinf(k), ceiling, finite)
@@ -123,6 +141,11 @@ def _remaining_gain(redundancy, n_splits, max_splits):
     """G(K_max) / G(k) - 1 on the reference curve (0 once k >= K_max)."""
     if n_splits >= max_splits:
         return 0.0
+    if redundancy <= 0:
+        # G(K) = K: (K_max - k) / k in one correctly rounded division, so that an exact tie with tol (e.g. 6 / 5 - 1
+        # = 0.2, which the curve's ratio gives as 0.19999999999999996) is not rounded below it, and the strict <
+        # continues there
+        return (max_splits - n_splits) / n_splits
     return projected_gain(redundancy, max_splits) / projected_gain(redundancy, n_splits) - 1.0
 
 
@@ -131,20 +154,22 @@ def stopping_split(redundancy, max_splits=None, tol=DEFAULT_TOL, min_splits=DEFA
 
     The smallest k >= min_splits with G(K_max) / G(k) - 1 < tol, or K_max when the budget comes first.
     ``max_splits=None`` is an unlimited budget: the rule compares with the ceiling 1 / omega and never stops when
-    omega <= 0 (returns ``math.inf``). Used for the table of the README; a real run re-reads the redundancy after
-    every split.
+    omega <= 0 (returns ``math.inf``; also when omega is so small, below about 1e-16 / tol, that the stop would lie
+    beyond 2^53 splits, where split counts are no longer exact floats). Used for the table of the README; a real run
+    re-reads the redundancy after every split. Exact ties with tol are honoured only when the redundancy is <= 0
+    (G(K) = K); for a positive redundancy a tie is decided by floating-point rounding, as in RedundancyMonitor.
     """
     _check_rule(max_splits, tol, min_splits)
     omega = float(redundancy)
-    if math.isnan(omega):
-        raise ValueError("the redundancy is NaN")
+    if not math.isfinite(omega):
+        raise ValueError(f"the redundancy must be a finite number, got {redundancy!r}")
     if max_splits is not None:
         max_splits = int(max_splits)
         for k in range(min(min_splits, max_splits), max_splits + 1):
             if k >= min_splits and _remaining_gain(omega, k, max_splits) < tol:
                 return k
         return max_splits
-    if omega <= 0:
+    if omega <= 0 or not tol * omega * 2.0 ** 53 > 1.0 - omega:  # no stop, or one beyond 2^53 splits
         return math.inf
     # G(inf) / G(k) - 1 = (1 - omega) / (k * omega): below tol once k > (1 - omega) / (tol * omega)
     k = max(int(min_splits), int((1.0 - omega) / (tol * omega)) - 1)
@@ -168,10 +193,11 @@ class RedundancyMonitor:
         Stop once the splits left in the budget would add less than this share of gain, G(K_max) / G(k) - 1 < tol.
         The default 0.1 stops once they would shrink the test-side standard error of the CV estimate by less than 5%.
     min_splits : int
-        No stop before this many splits (at least 2; 3 by default). With the default tol the rule cannot stop that
-        early anyway (at t = 0.2, not before 13 of 20 splits or 33 of 200): it matters only when the rule can stop
-        within the first few splits, with a larger tol or test fraction, or a small budget. Use 5 then on small
-        data, where a reading after 3 splits is noisy.
+        No stop before this many splits (at least 2; 3 by default). With the default tol and a test fraction up to
+        0.23, the rule never stops before split 5 unless the budget is spent, so 3 and 5 give the same stop. It
+        matters with a larger tol and a small budget, or a test fraction well above 0.2: ``stopping_split(0.2, 10,
+        tol=0.5)`` and ``stopping_split(0.5, 7)`` are 4, and 5 with ``min_splits=5``. Use 5 then on small data, where
+        a reading after 3 splits is noisy.
 
     Use ``add_split(test_indices, losses)`` after each split, then ``should_stop()``. The splits must be Monte Carlo
     splits (test sets drawn at random and independently, as ShuffleSplit or StratifiedShuffleSplit): in K-fold, the
@@ -188,7 +214,7 @@ class RedundancyMonitor:
     """
 
     def __init__(self, n_samples, *, max_splits=None, tol=DEFAULT_TOL, min_splits=DEFAULT_MIN_SPLITS):
-        if int(n_samples) != n_samples or n_samples < 2:
+        if not _is_count(n_samples, 2):
             raise ValueError(f"n_samples must be an integer >= 2, got {n_samples!r}")
         _check_rule(max_splits, tol, min_splits)
         self.n_samples = int(n_samples)
@@ -246,10 +272,9 @@ class RedundancyMonitor:
         if loss.shape != idx.shape:
             raise ValueError(f"losses must hold one value per test index: {idx.size} indices, losses of shape "
                              f"{loss.shape}")
-        try:
-            loss = loss.astype(float)
-        except (TypeError, ValueError):
-            raise TypeError(f"losses must be numbers, got dtype {loss.dtype}") from None
+        if loss.dtype.kind not in "biuf":  # strings, complex, objects
+            raise TypeError(f"losses must be real numbers (a boolean, integer or float dtype), got dtype {loss.dtype}")
+        loss = loss.astype(float)
         if idx.min() < 0 or idx.max() >= self.n_samples:
             raise ValueError(f"test indices must lie in [0, {self.n_samples}), got [{idx.min()}, {idx.max()}]")
         order = np.argsort(idx, kind="stable")
@@ -265,8 +290,10 @@ class RedundancyMonitor:
         """Add one split: its test indices and the per-sample losses of its predictor on them (same order).
 
         ``test_indices``: integer positions in ``range(n_samples)``, unique, or a boolean mask of length n_samples
-        (``losses`` then in increasing index order). Lists, NumPy arrays and torch tensors are accepted. Returns the
-        monitor.
+        (``losses`` then in increasing index order). ``losses``: real numbers (boolean, integer or float; an object
+        array is rejected, even of numbers). Lists, NumPy arrays and torch tensors are accepted; a pandas Series of
+        losses is used by position, its index is ignored.
+        Returns the monitor.
         """
         idx, loss = self._validate(test_indices, losses)
         b = len(self._indices)
@@ -315,7 +342,11 @@ class RedundancyMonitor:
 
     @property
     def test_fraction(self):
-        """t = n_te / n, with n_te the mean test-set size of the splits so far (NaN before the first split)."""
+        """t = n_te / n, with n_te the mean test-set size of the splits so far (NaN before the first split).
+
+        The realised fraction: the paper's simulated analyses multiply by the nominal 0.2, which is the same whenever
+        0.2 n is an integer (every PCam and Yelp size).
+        """
         if not self._test_sizes:
             return math.nan
         return float(np.mean(self._test_sizes)) / self.n_samples
@@ -327,12 +358,20 @@ class RedundancyMonitor:
 
     @property
     def mean_pair_covariance(self):
-        """mean_pairs(cov_ab), the numerator of the loss correlation."""
+        """mean_pairs(cov_ab), the numerator of the loss correlation.
+
+        A mean over the ``n_pairs`` pairs that qualify, as in the paper's scripts; the paper's displayed C_hat divides
+        by C(k, 2), so only the ratio of this mean and ``mean_pair_variance`` is the paper's statistic.
+        """
         return float(np.mean(self._covs)) if self._covs else math.nan
 
     @property
     def mean_pair_variance(self):
-        """mean_pairs(var_ab), the denominator of the loss correlation."""
+        """mean_pairs(var_ab), the denominator of the loss correlation.
+
+        A mean over the ``n_pairs`` pairs that qualify, as in the paper's scripts (the paper's displayed V_hat divides
+        by C(k, 2)); see ``mean_pair_covariance``.
+        """
         return float(np.mean(self._vars)) if self._vars else math.nan
 
     @property
@@ -363,12 +402,14 @@ class RedundancyMonitor:
         n_with = np.bincount(pairs[:, 0], minlength=k) + np.bincount(pairs[:, 1], minlength=k)
         if np.any(n_with == len(covs)):
             return None
-        cov_with = np.bincount(pairs[:, 0], covs, k) + np.bincount(pairs[:, 1], covs, k)
-        var_with = np.bincount(pairs[:, 0], vars_, k) + np.bincount(pairs[:, 1], vars_, k)
-        # ratio of means = ratio of sums over the same pairs
-        cov_without, var_without = covs.sum() - cov_with, vars_.sum() - var_with
-        with np.errstate(divide="ignore", invalid="ignore"):
-            rho = np.where(var_without > 0, cov_without / var_without, 0.0)
+        # ratio of means = ratio of sums over the same pairs; the pairs left are summed directly, as subtracting the
+        # pairs of split j from the total would lose the digits of the others when split j's losses are far larger
+        rho = np.zeros(k)
+        for j in range(k):
+            keep = (pairs[:, 0] != j) & (pairs[:, 1] != j)
+            cov_without, var_without = covs[keep].sum(), vars_[keep].sum()
+            if var_without > 0:
+                rho[j] = cov_without / var_without
         sizes = np.asarray(self._test_sizes, dtype=float)
         t = (sizes.sum() - sizes) / (k - 1) / self.n_samples
         return t * rho
@@ -379,6 +420,8 @@ class RedundancyMonitor:
 
         It measures how much the reading depends on the splits drawn, for this study set; it does not include the
         variation from one study set to another. NaN before 3 splits or while a leave-one-out reading is undefined.
+        Its cost grows as k^3 for k splits (seconds at about 1,000 splits); the repr and ``summary()`` include it,
+        so avoid them after every split of a long run.
         """
         loo = self._leave_one_out()
         if loo is None:
@@ -414,10 +457,15 @@ class RedundancyMonitor:
         losses that are constant on every shared test set (the loss correlation is then set to 0).
         """
         stop = self._rule()
-        if stop and not self.is_defined:
+        if stop and not self.is_defined and self.n_splits < 2:
+            self._warn_once("undefined", "the budget is spent after a single split, which gives no pair of test sets: "
+                                         "the redundancy is undefined and the rule never applied (use a budget of 2 "
+                                         "splits or more)")
+        elif stop and not self.is_defined:
             self._warn_once("undefined", "the budget is spent and no two test sets shared 2 observations: the "
-                                         "redundancy is undefined and the rule never applied (larger test sets or "
-                                         "more data would help)")
+                                         "redundancy is undefined and the rule never applied (the test sets of one "
+                                         "K-fold repeat never overlap; Monte Carlo splits with larger test sets, or "
+                                         "more data, would help)")
         elif stop and not self.mean_pair_variance > 0:
             self._warn_once("constant", "the losses are constant on the observations shared by every pair of test "
                                         "sets: the loss correlation is set to 0 and the redundancy carries no "
@@ -426,7 +474,7 @@ class RedundancyMonitor:
         return stop
 
     def summary(self):
-        """Every quantity of the monitor, as a dict."""
+        """Every quantity of the monitor, as a dict (the projected gains are on the reference curve, kappa = 0)."""
         budget = math.inf if self.max_splits is None else self.max_splits
         return {
             "n_samples": self.n_samples,
@@ -463,5 +511,6 @@ class RedundancyMonitor:
         compare = "<" if remaining < self.tol else ">="
         return (f"{head}, redundancy={self.redundancy:.3f}{se}, loss correlation={self.loss_correlation:.3f}, "
                 f"t={self.test_fraction:.3f}, pairs={self.n_pairs}, "
-                f"mean intersection={self.mean_intersection_size:.1f}; projected gain {self.projected_gain():.2f} now, "
-                f"{g_max:.2f} at {at} (+{100 * remaining:.2f}% {compare} tol {100 * self.tol:g}%): {decision})")
+                f"mean intersection={self.mean_intersection_size:.1f}; reference-curve gain (kappa = 0) "
+                f"{self.projected_gain():.2f} now, {g_max:.2f} at {at} (+{100 * remaining:.2f}% {compare} tol "
+                f"{100 * self.tol:g}%): {decision})")

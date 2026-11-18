@@ -29,11 +29,40 @@ def _per_sample(value, n):
     return isinstance(value, (list, tuple)) and len(value) == n
 
 
+def _no_method(estimator, method, loss):
+    return f"{type(estimator).__name__} has no {method}, which loss={loss!r} needs"
+
+
+def _check_loss(estimator, loss):
+    """Resolve ``loss`` and check it against the estimator, before any loss is computed: fail, or warn."""
+    from sklearn.base import is_classifier, is_regressor
+
+    func, method, _ = resolve_loss(loss)
+    try:
+        getattr(estimator, method)
+    except AttributeError:  # NotFittedError too; methods such as a StackingRegressor's exist only once it is fitted
+        if not hasattr(type(estimator), method):
+            raise TypeError(_no_method(estimator, method, loss)) from None
+    if is_classifier(estimator) and func is squared_error:
+        _warn(f"loss={loss!r} on the predicted labels of a classifier: pass the per-sample loss of the metric of "
+              "interest, e.g. loss='zero_one' (accuracy), 'log_loss' or 'brier'")
+    if is_regressor(estimator) and func is zero_one:
+        _warn(f"loss={loss!r} compares predicted and true labels, but the estimator is a regressor: its losses are "
+              "all 1; pass the per-sample loss of its metric, e.g. loss='squared_error'")
+
+
 def _split_losses(estimator, X, y, test, loss):
     """Per-sample losses of a fitted estimator on the test part ``test``."""
     from sklearn.utils import _safe_indexing
     func, method, takes_classes = resolve_loss(loss)
-    y_pred = getattr(estimator, method)(_safe_indexing(X, test))
+    try:
+        predict = getattr(estimator, method)
+    except AttributeError as exc:  # a parameter or a wrapped estimator disables it, as SVC(probability=False)
+        cause = exc  # or a Pipeline ending in a regressor; the innermost error says why
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        raise TypeError(f"{_no_method(estimator, method, loss)} ({cause})") from None
+    y_pred = predict(_safe_indexing(X, test))
     y_test = np.asarray(_safe_indexing(y, test))
     if takes_classes:
         return func(y_test, y_pred, classes=getattr(estimator, "classes_", None))
@@ -59,16 +88,21 @@ def cross_validate_until_redundant(estimator, X, y, *, cv=None, loss="squared_er
         ``max_splits`` is None too. Another splitter, or an iterable of (train, test) pairs, runs with a warning:
         the redundancy assumes test sets drawn at random and independently.
     loss : str, callable or (callable, str), default="squared_error"
-        The per-sample loss of the metric whose precision matters: "squared_error" (MSE), "zero_one" (accuracy),
-        "log_loss", "brier", a metric name such as "accuracy" or "neg_log_loss", a callable
+        The per-sample loss of the metric whose precision matters: "squared_error" (MSE), "absolute_error" (MAE),
+        "zero_one" (accuracy), "log_loss", "brier", a metric name such as "accuracy" or "neg_log_loss", a callable
         ``loss(y_true, y_pred)`` on the output of ``predict`` that returns one value per sample, or a pair
-        (callable, "predict_proba").
+        (callable, "predict_proba"), whose callable gets the probability columns in the order of
+        ``estimator.classes_`` (and ``classes=estimator.classes_`` if it takes a ``classes`` keyword, as
+        ``log_loss`` and ``brier`` do). A prediction method the estimator lacks is a TypeError before any fit, or
+        after the first fit when the estimator's class has the method but its parameters or a wrapped estimator
+        disable it (``SVC(probability=False)``, a Pipeline ending in a regressor, ``voting="hard"``).
     tol : float, default=0.1
         Stop once the splits left in the budget would add less than this share of gain, G(K_max) / G(k) - 1 < tol.
     min_splits : int, default=3
-        No stop before this many splits.
+        No stop before this many splits (see ``RedundancyMonitor``: with the default tol and t = 0.2, the rule never
+        stops before split 5 anyway, unless the budget is spent).
     max_splits : int, default=None
-        The budget K_max, at most the number of splits of ``cv`` (its default).
+        The budget K_max, at most the number of splits of ``cv``. None: that number (100 with ``cv=None``).
     groups : array-like of shape (n_samples,), default=None
         Passed to ``cv.split``.
     params : dict, default=None
@@ -83,36 +117,22 @@ def cross_validate_until_redundant(estimator, X, y, *, cv=None, loss="squared_er
     -------
     result : dict
         As ``sklearn.model_selection.cross_validate``, one entry per split run (``pandas.DataFrame(result)`` gives
-        one row per split):
+        one row per split, unless ``return_indices``):
 
         - "test_loss": mean per-sample loss on each test part (the metric, as a loss: MSE, error rate, ...);
         - "fit_time", "score_time";
         - "redundancy": the redundancy after each split (NaN while undefined);
         - "n_splits": the number of splits run; "stopped_early": whether the rule stopped before the budget;
-        - "monitor": the ``RedundancyMonitor``, with every statistic of the last split;
+        - "monitor": the ``RedundancyMonitor``, with its statistics after the last split;
         - "estimator": the fitted estimators, if ``return_estimator``;
         - "indices": {"train": [...], "test": [...]}, if ``return_indices``.
     """
-    from sklearn.base import clone, is_classifier, is_regressor
-    from sklearn.exceptions import NotFittedError
+    from sklearn.base import clone, is_classifier
     from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
     from sklearn.utils import _safe_indexing
     from sklearn.utils.multiclass import type_of_target
 
-    # fail, or warn, before any fit
-    func, method, _ = resolve_loss(loss)
-    try:
-        getattr(estimator, method)
-    except NotFittedError:
-        pass
-    except AttributeError:
-        raise TypeError(f"{type(estimator).__name__} has no {method}, which loss={loss!r} needs") from None
-    if is_classifier(estimator) and func is squared_error:
-        _warn("loss='squared_error' on the predicted labels of a classifier: pass the per-sample loss of the metric "
-              "of interest, e.g. loss='zero_one' (accuracy), 'log_loss' or 'brier'")
-    if is_regressor(estimator) and func is zero_one:
-        _warn(f"loss={loss!r} compares predicted and true labels, but the estimator is a regressor: its losses are "
-              "all 1; pass the per-sample loss of its metric, e.g. loss='squared_error'")
+    _check_loss(estimator, loss)  # fail, or warn, before any fit where possible
 
     if cv is None:
         stratify = is_classifier(estimator) and type_of_target(y) in ("binary", "multiclass")
@@ -128,7 +148,7 @@ def cross_validate_until_redundant(estimator, X, y, *, cv=None, loss="squared_er
         splits = list(cv)
         n_available = len(splits)
     splitter_warning = None
-    if isinstance(cv, GroupShuffleSplit):  # a subclass of ShuffleSplit
+    if isinstance(cv, GroupShuffleSplit):  # checked first: a subclass of ShuffleSplit in older scikit-learn
         splitter_warning = ("GroupShuffleSplit draws the test sets by group: the redundancy and its reference curve "
                             "assume independent observations (Appendix D.2), and the paper has no result on grouped "
                             "splits")
@@ -186,12 +206,17 @@ def redundancy_from_cv_results(cv_results, X, y, *, loss="squared_error", tol=DE
     ``cv_results``: the output of ``sklearn.model_selection.cross_validate(estimator, X, y, cv=...,
     return_estimator=True, return_indices=True)`` (scikit-learn >= 1.3), on the same X and y, with a ShuffleSplit-like
     cv. ``max_splits`` defaults to the number of splits run; pass a larger budget to ask whether more splits would
-    pay (``monitor.remaining_gain()``, ``monitor.should_stop()``).
+    pay, with ``monitor.remaining_gain()`` (after 5 splits at t = 0.2, ``should_stop()`` is False for any budget above
+    6). ``loss`` as in ``cross_validate_until_redundant``, checked in the same way against the first fitted estimator.
     """
     if "estimator" not in cv_results or "indices" not in cv_results:
         raise ValueError("cv_results needs the fitted estimators and the test indices: call cross_validate with "
                          "return_estimator=True and return_indices=True")
     tests = cv_results["indices"]["test"]
+    if len(cv_results["estimator"]) != len(tests) or not len(tests):
+        raise ValueError(f"cv_results holds {len(cv_results['estimator'])} fitted estimators and {len(tests)} test "
+                         "sets: it needs one of each per split, and at least one split")
+    _check_loss(cv_results["estimator"][0], loss)
     if max_splits is None:
         max_splits = len(tests)
     monitor = RedundancyMonitor(_n_samples(X), max_splits=max_splits, tol=tol, min_splits=min_splits)
